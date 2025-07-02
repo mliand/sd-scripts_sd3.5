@@ -56,14 +56,11 @@ class SD3Params:
     context_embedder_in_features: int
     context_embedder_out_features: int
     model_type: str
-    use_bucketed_pos_embed: bool = False
 
 
 def get_2d_sincos_pos_embed(
     embed_dim,
     grid_size,
-    cls_token=False,
-    extra_tokens=0,
     scaling_factor=None,
     offset=None,
 ):
@@ -78,10 +75,6 @@ def get_2d_sincos_pos_embed(
 
     grid = grid.reshape([2, 1, grid_size, grid_size])
     pos_embed = get_2d_sincos_pos_embed_from_grid(embed_dim, grid)
-    if cls_token and extra_tokens > 0:
-        pos_embed = np.concatenate(
-            [np.zeros([extra_tokens, embed_dim]), pos_embed], axis=0
-        )
     return pos_embed
 
 
@@ -160,6 +153,7 @@ def get_scaled_2d_sincos_pos_embed(embed_dim, grid_size, cls_token=False, extra_
 
     return pos_embed
 
+
 # if __name__ == "__main__":
 #     # This is what you get when you load SD3.5 state dict
 #     pos_emb = torch.from_numpy(get_scaled_2d_sincos_pos_embed(
@@ -188,7 +182,6 @@ def get_1d_sincos_pos_embed_from_grid(embed_dim, pos):
     return emb
 
 
-
 def get_1d_sincos_pos_embed_from_grid_torch(
     embed_dim,
     pos,
@@ -200,58 +193,6 @@ def get_1d_sincos_pos_embed_from_grid_torch(
     omega = 1.0 / 10000**omega
     out = torch.outer(pos.reshape(-1), omega)
     emb = torch.cat([out.sin(), out.cos()], dim=1)
-    return emb
-
-
-def get_bucketed_pos_embed(
-    embed_dim,
-    h_max,
-    w_max,
-    s,
-    h,
-    w,
-    device=None,
-    dtype=torch.float32,
-):
-    """
-    根据论文实现的bucketed sampling位置嵌入
-    
-    Args:
-        embed_dim: 嵌入维度
-        h_max: 最大高度 (latent space)
-        w_max: 最大宽度 (latent space) 
-        s: 目标分辨率参数 (latent space)
-        h: 当前高度 (latent space)
-        w: 当前宽度 (latent space)
-        device: 设备
-        dtype: 数据类型
-    
-    Returns:
-        位置嵌入张量 shape: (h*w, embed_dim)
-    """
-    # 构建垂直位置网格
-    vertical_positions = torch.arange(h_max, device=device, dtype=dtype)
-    vertical_positions = (vertical_positions - (h_max - s) / 2) * 256 / s
-    
-    # 构建水平位置网格
-    horizontal_positions = torch.arange(w_max, device=device, dtype=dtype)
-    horizontal_positions = (horizontal_positions - (w_max - s) / 2) * 256 / s
-    
-    # 创建2D网格
-    grid_h, grid_w = torch.meshgrid(vertical_positions, horizontal_positions, indexing="ij")
-    
-    # 中心裁剪到目标尺寸
-    start_h = (h_max - h) // 2
-    start_w = (w_max - w) // 2
-    grid_h = grid_h[start_h:start_h + h, start_w:start_w + w]
-    grid_w = grid_w[start_h:start_h + h, start_w:start_w + w]
-    
-    # 生成位置嵌入
-    emb_h = get_1d_sincos_pos_embed_from_grid_torch(embed_dim // 2, grid_h, device=device, dtype=dtype)
-    emb_w = get_1d_sincos_pos_embed_from_grid_torch(embed_dim // 2, grid_w, device=device, dtype=dtype)
-    
-    # 合并水平和垂直嵌入
-    emb = torch.cat([emb_w, emb_h], dim=1)  # (H*W, D)
     return emb
 
 
@@ -308,10 +249,10 @@ def timestep_embedding(t, dim, max_period=10000):
 class PatchEmbed(nn.Module):
     def __init__(
         self,
-        img_size=224,
-        patch_size=16,
+        img_size=256,
+        patch_size=4,
         in_channels=3,
-        embed_dim=768,
+        embed_dim=512,
         norm_layer=None,
         flatten=True,
         bias=True,
@@ -353,7 +294,7 @@ class PatchEmbed(nn.Module):
 
 # FinalLayer in mmdit.py
 class UnPatch(nn.Module):
-    def __init__(self, hidden_size=768, patch_size=16, out_channels=3):
+    def __init__(self, hidden_size=512, patch_size=4, out_channels=3):
         super().__init__()
         self.patch_size = patch_size
         self.c = out_channels
@@ -834,7 +775,6 @@ class MMDiT(nn.Module):
         pos_emb_random_crop_rate: float = 0.0,
         use_scaled_pos_embed: bool = False,
         pos_embed_latent_sizes: Optional[list[int]] = None,
-        use_bucketed_pos_embed: bool = False,
         model_type: str = "sd3m",
     ):
         super().__init__()
@@ -849,7 +789,6 @@ class MMDiT(nn.Module):
         self.pos_embed_max_size = pos_embed_max_size
         self.x_block_self_attn_layers = x_block_self_attn_layers
         self.pos_emb_random_crop_rate = pos_emb_random_crop_rate
-        self.use_bucketed_pos_embed = use_bucketed_pos_embed
         self.gradient_checkpointing = use_checkpoint
 
         # hidden_size = default(hidden_size, 64 * depth)
@@ -1133,53 +1072,6 @@ class MMDiT(nn.Module):
         # )
         return spatial_pos_embed
 
-    def bucketed_pos_embed(self, h, w, device=None, dtype=None):
-        """
-        基于论文的bucketed sampling位置嵌入方法
-        
-        Args:
-            h: 图像高度 (像素)
-            w: 图像宽度 (像素)
-            device: 设备
-            dtype: 数据类型
-            
-        Returns:
-            位置嵌入张量
-        """
-        p = self.x_embedder.patch_size
-        # 转换到latent space (patched size)
-        h_latent = (h + 1) // p
-        w_latent = (w + 1) // p
-        
-        # 计算目标分辨率S在latent space中的值
-        # 假设训练时的目标分辨率为1024像素，对应latent space中的64
-        target_resolution_pixels = 1440  # 可以根据实际训练配置调整
-        s_latent = target_resolution_pixels // p  # 64 for patch_size=16
-        
-        # 根据aspect ratio计算最大尺寸
-        # 这里使用简化的计算，实际可以根据训练时的aspect ratio范围调整
-        max_aspect_ratio = 8.0  # 最大宽高比
-        min_aspect_ratio = 0.125  # 最小宽高比
-        
-        # 计算最大高度和宽度 (latent space)
-        h_max = int(s_latent * max_aspect_ratio**0.5)
-        w_max = int(s_latent * max_aspect_ratio**0.5)
-        
-        # 确保当前尺寸不超过最大尺寸
-        h_max = max(h_max, h_latent)
-        w_max = max(w_max, w_latent)
-        
-        return get_bucketed_pos_embed(
-            self.hidden_size,
-            h_max,
-            w_max, 
-            s_latent,
-            h_latent,
-            w_latent,
-            device=device,
-            dtype=dtype
-        )
-
     def enable_block_swap(self, num_blocks: int, device: torch.device):
         self.blocks_to_swap = num_blocks
 
@@ -1228,10 +1120,7 @@ class MMDiT(nn.Module):
         B, C, H, W = x.shape
 
         # x = self.x_embedder(x) + self.cropped_pos_embed(H, W, device=x.device, random_crop=pos_emb_random_crop).to(dtype=x.dtype)
-        if self.use_bucketed_pos_embed:
-            # 使用新的bucketed位置嵌入
-            pos_embed = self.bucketed_pos_embed(H, W, device=x.device, dtype=x.dtype)
-        elif not self.use_scaled_pos_embed:
+        if not self.use_scaled_pos_embed:
             pos_embed = self.cropped_pos_embed(H, W, device=x.device, random_crop=pos_emb_random_crop).to(dtype=x.dtype)
         else:
             # print(f"Using scaled pos_embed for size {H}x{W}")
@@ -1283,7 +1172,6 @@ def create_sd3_mmdit(params: SD3Params, attn_mode: str = "torch") -> MMDiT:
         num_patches=params.num_patches,
         attn_mode=attn_mode,
         model_type=params.model_type,
-        use_bucketed_pos_embed=params.use_bucketed_pos_embed,
     )
     return mmdit
 
@@ -1538,4 +1426,3 @@ class SDVAE(torch.nn.Module):
 
 
 # endregion
-

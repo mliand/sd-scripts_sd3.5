@@ -947,3 +947,4 @@ def get_noisy_model_input_and_timesteps(args, latents, noise, device, dtype) -> 
     noisy_model_input = sigmas * noise + (1.0 - sigmas) * latents
 
     return noisy_model_input, timesteps, sigmas
+

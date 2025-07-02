@@ -115,6 +115,12 @@ class Sd3TextEncodingStrategy(TextEncodingStrategy):
                     non_drop_l_indices.append(i)
                 if not drop_g:
                     non_drop_g_indices.append(i)
+            
+            # 确保至少保留一个样本
+            if len(non_drop_l_indices) == 0:
+                non_drop_l_indices.append(0)  # 强制保留第一个样本
+            if len(non_drop_g_indices) == 0:
+                non_drop_g_indices.append(0)  # 强制保留第一个样本
 
             # filter out dropped members
             if len(non_drop_l_indices) > 0 and len(non_drop_l_indices) < batch_size:
@@ -150,9 +156,9 @@ class Sd3TextEncodingStrategy(TextEncodingStrategy):
                 l_out = torch.zeros((batch_size, l_seq_len, 768), device=clip_l.device, dtype=torch.float32)
                 l_attn_mask = torch.zeros((batch_size, l_seq_len), device=clip_l.device, dtype=l_attn_mask.dtype)
                 if len(non_drop_l_indices) > 0:
-                    l_pooled[non_drop_l_indices] = nd_l_pooled
-                    l_out[non_drop_l_indices] = nd_l_out
-                    l_attn_mask[non_drop_l_indices] = nd_l_attn_mask
+                    l_pooled[non_drop_l_indices] = nd_l_pooled.to(l_pooled.dtype)
+                    l_out[non_drop_l_indices] = nd_l_out.to(l_out.dtype)
+                    l_attn_mask[non_drop_l_indices] = nd_l_attn_mask.to(l_attn_mask.dtype)
 
             if len(non_drop_g_indices) == batch_size:
                 g_pooled = nd_g_pooled
@@ -162,9 +168,9 @@ class Sd3TextEncodingStrategy(TextEncodingStrategy):
                 g_out = torch.zeros((batch_size, g_seq_len, 1280), device=clip_g.device, dtype=torch.float32)
                 g_attn_mask = torch.zeros((batch_size, g_seq_len), device=clip_g.device, dtype=g_attn_mask.dtype)
                 if len(non_drop_g_indices) > 0:
-                    g_pooled[non_drop_g_indices] = nd_g_pooled
-                    g_out[non_drop_g_indices] = nd_g_out
-                    g_attn_mask[non_drop_g_indices] = nd_g_attn_mask
+                    g_pooled[non_drop_g_indices] = nd_g_pooled.to(g_pooled.dtype)
+                    g_out[non_drop_g_indices] = nd_g_out.to(g_out.dtype)
+                    g_attn_mask[non_drop_g_indices] = nd_g_attn_mask.to(g_attn_mask.dtype)
 
             lg_pooled = torch.cat((l_pooled, g_pooled), dim=-1)
             lg_out = torch.cat([l_out, g_out], dim=-1)
@@ -180,7 +186,10 @@ class Sd3TextEncodingStrategy(TextEncodingStrategy):
                 drop_t5 = enable_dropout and (self.t5_dropout_rate > 0.0 and random.random() < self.t5_dropout_rate)
                 if not drop_t5:
                     non_drop_t5_indices.append(i)
-
+            
+            # 确保至少保留一个样本
+            if len(non_drop_t5_indices) == 0:
+                non_drop_t5_indices.append(0)  # 强制保留第一个样本
             # filter out dropped members
             if len(non_drop_t5_indices) > 0 and len(non_drop_t5_indices) < batch_size:
                 t5_tokens = t5_tokens[non_drop_t5_indices]
@@ -203,8 +212,8 @@ class Sd3TextEncodingStrategy(TextEncodingStrategy):
                 t5_out = torch.zeros((batch_size, t5_seq_len, 4096), device=t5xxl.device, dtype=torch.float32)
                 t5_attn_mask = torch.zeros((batch_size, t5_seq_len), device=t5xxl.device, dtype=t5_attn_mask.dtype)
                 if len(non_drop_t5_indices) > 0:
-                    t5_out[non_drop_t5_indices] = nd_t5_out
-                    t5_attn_mask[non_drop_t5_indices] = nd_t5_attn_mask
+                    t5_out[non_drop_t5_indices] = nd_t5_out.to(t5_out.dtype)
+                    t5_attn_mask[non_drop_t5_indices] = nd_t5_attn_mask.to(t5_attn_mask.dtype)
 
         # masks are used for attention masking in transformer
         return [lg_out, t5_out, lg_pooled, l_attn_mask, g_attn_mask, t5_attn_mask]
@@ -418,3 +427,4 @@ class Sd3LatentsCachingStrategy(LatentsCachingStrategy):
 
         if not train_util.HIGH_VRAM:
             train_util.clean_memory_on_device(vae.device)
+
