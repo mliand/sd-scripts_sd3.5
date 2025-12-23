@@ -76,7 +76,12 @@ def analyze_state_dict_state(state_dict: Dict, prefix: str = ""):
 
 
 def load_mmdit(
-    state_dict: Dict, dtype: Optional[Union[str, torch.dtype]], device: Union[str, torch.device], attn_mode: str = "torch"
+    state_dict: Dict,
+    dtype: Optional[Union[str, torch.dtype]],
+    device: Union[str, torch.device],
+    attn_mode: str = "torch",
+    attn_output_gate: Optional[str] = None,
+    attn_output_gate_init_bias: float = 2.0,
 ) -> sd3_models.MMDiT:
     mmdit_sd = {}
 
@@ -88,8 +93,25 @@ def load_mmdit(
     # load MMDiT
     logger.info("Building MMDit")
     params = analyze_state_dict_state(mmdit_sd)
+
+    if attn_output_gate is None:
+        gate_weight_key = next((k for k in mmdit_sd.keys() if k.endswith(".gate_proj.weight")), None)
+        if gate_weight_key is not None:
+            out_features = mmdit_sd[gate_weight_key].shape[0]
+            if out_features == params.depth:
+                attn_output_gate = "headwise"
+            elif out_features == 64 * params.depth:
+                attn_output_gate = "elementwise"
+            else:
+                logger.warning(f"Found gate_proj in checkpoint but couldn't infer gate type from shape: {mmdit_sd[gate_weight_key].shape}")
+
     with init_empty_weights():
-        mmdit = sd3_models.create_sd3_mmdit(params, attn_mode)
+        mmdit = sd3_models.create_sd3_mmdit(
+            params,
+            attn_mode,
+            attn_output_gate=attn_output_gate,
+            attn_output_gate_init_bias=attn_output_gate_init_bias,
+        )
 
     logger.info("Loading state dict...")
     info = mmdit.load_state_dict(mmdit_sd, strict=False, assign=True)

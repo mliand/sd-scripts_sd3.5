@@ -339,7 +339,14 @@ def train(args):
         accelerator.wait_for_everyone()
 
     # load MMDIT
-    mmdit = sd3_utils.load_mmdit(sd3_state_dict, model_dtype, "cpu")
+    attn_output_gate = None if args.mmdit_attn_output_gate == "none" else args.mmdit_attn_output_gate
+    mmdit = sd3_utils.load_mmdit(
+        sd3_state_dict,
+        model_dtype,
+        "cpu",
+        attn_output_gate=attn_output_gate,
+        attn_output_gate_init_bias=args.mmdit_attn_output_gate_init_bias,
+    )
 
     # attn_mode = "xformers" if args.xformers else "torch"
     # assert (
@@ -824,9 +831,51 @@ def train(args):
                     lg_pooled = torch.nan_to_num(lg_pooled, 0, out=lg_pooled)
 
                 # call model
+                collect_gate_stats = (
+                    args.log_mmdit_gate_stats
+                    and train_mmdit
+                    and accelerator.is_main_process
+                    and (global_step % args.log_mmdit_gate_stats_every_n_steps == 0)
+                )
+                if collect_gate_stats:
+                    mmdit.set_collect_gate_stats(True)
+
                 with accelerator.autocast():
                     # TODO support attention mask
                     model_pred = mmdit(noisy_model_input, timesteps, context=context, y=lg_pooled)
+
+                if collect_gate_stats:
+                    mmdit.set_collect_gate_stats(False)
+                    gate_stats = mmdit.pop_gate_stats()
+                    if gate_stats:
+                        means = [v.get("mean", 0.0) for v in gate_stats.values()]
+                        frac_lt_01 = [v.get("frac_lt_0.1", 0.0) for v in gate_stats.values()]
+                        frac_lt_001 = [v.get("frac_lt_0.01", 0.0) for v in gate_stats.values()]
+                        frac_gt_09 = [v.get("frac_gt_0.9", 0.0) for v in gate_stats.values()]
+
+                        def avg(xs):
+                            return float(sum(xs) / max(len(xs), 1))
+
+                        logs = {
+                            "gate/mean": avg(means),
+                            "gate/frac_lt_0.1": avg(frac_lt_01),
+                            "gate/frac_lt_0.01": avg(frac_lt_001),
+                            "gate/frac_gt_0.9": avg(frac_gt_09),
+                        }
+
+                        for i, (name, stats) in enumerate(sorted(gate_stats.items())):
+                            if i >= args.log_mmdit_gate_stats_max_modules:
+                                break
+                            for k, val in stats.items():
+                                logs[f"gate/{name}/{k}"] = val
+
+                        if len(accelerator.trackers) > 0:
+                            accelerator.log(logs, step=global_step)
+                        accelerator.print(
+                            f"[gate_stats step={global_step}] mean={logs['gate/mean']:.4f} "
+                            f"lt0.1={logs['gate/frac_lt_0.1']:.3f} lt0.01={logs['gate/frac_lt_0.01']:.3f} "
+                            f"gt0.9={logs['gate/frac_gt_0.9']:.3f}"
+                        )
 
                 # Follow: Section 5 of https://arxiv.org/abs/2206.00364.
                 # Preconditioning of the model outputs.
@@ -1060,6 +1109,36 @@ def setup_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="freeze last n blocks of MM-DIT / MM-DITの最後のnブロックを凍結する",
+    )
+    parser.add_argument(
+        "--mmdit_attn_output_gate",
+        type=str,
+        default="none",
+        choices=["none", "headwise", "elementwise"],
+        help="apply sigmoid gate after attention output in MMDiT: none/headwise/elementwise (requires finetuning for effect)",
+    )
+    parser.add_argument(
+        "--mmdit_attn_output_gate_init_bias",
+        type=float,
+        default=2.0,
+        help="initial bias for gate_proj (higher => closer to 1 but more sigmoid saturation); default 2.0",
+    )
+    parser.add_argument(
+        "--log_mmdit_gate_stats",
+        action="store_true",
+        help="log sigmoid(gate) distribution stats from MMDiT to console and tracker (e.g., TensorBoard)",
+    )
+    parser.add_argument(
+        "--log_mmdit_gate_stats_every_n_steps",
+        type=int,
+        default=200,
+        help="log gate stats every N steps",
+    )
+    parser.add_argument(
+        "--log_mmdit_gate_stats_max_modules",
+        type=int,
+        default=16,
+        help="max number of per-module gate stat groups to log (others only contribute to aggregated stats)",
     )
     return parser
 

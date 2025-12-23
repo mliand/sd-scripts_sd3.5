@@ -525,12 +525,29 @@ class AttentionLinears(nn.Module):
         qkv_bias: bool = False,
         pre_only: bool = False,
         qk_norm: Optional[str] = None,
+        attn_output_gate: Optional[str] = None,
+        attn_output_gate_init_bias: float = 2.0,
     ):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
+        self._gate_stats_parent = None
+        self._gate_stats_name = None
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.attn_output_gate = attn_output_gate
+        self.attn_output_gate_init_bias = attn_output_gate_init_bias
+        if attn_output_gate is None:
+            self.gate_proj = None
+        elif attn_output_gate == "headwise":
+            self.gate_proj = nn.Linear(dim, num_heads, bias=True)
+        elif attn_output_gate == "elementwise":
+            self.gate_proj = nn.Linear(dim, dim, bias=True)
+        else:
+            raise ValueError(f"Unsupported attn_output_gate: {attn_output_gate!r}")
+        if self.gate_proj is not None:
+            nn.init.zeros_(self.gate_proj.weight)
+            nn.init.constant_(self.gate_proj.bias, float(attn_output_gate_init_bias))
         if not pre_only:
             self.proj = nn.Linear(dim, dim)
         self.pre_only = pre_only
@@ -547,6 +564,10 @@ class AttentionLinears(nn.Module):
         else:
             raise ValueError(qk_norm)
 
+    def set_gate_stats_hook(self, parent: nn.Module, name: str):
+        self._gate_stats_parent = parent
+        self._gate_stats_name = name
+
     def pre_attention(self, x: torch.Tensor) -> torch.Tensor:
         """
         output:
@@ -558,6 +579,44 @@ class AttentionLinears(nn.Module):
         q = self.ln_q(q).reshape(q.shape[0], q.shape[1], -1)
         k = self.ln_k(k).reshape(q.shape[0], q.shape[1], -1)
         return (q, k, v)
+
+    def compute_gate(self, x: torch.Tensor) -> Optional[torch.Tensor]:
+        """
+        Returns:
+            - None if gating disabled
+            - headwise: (B, L, H, 1)
+            - elementwise: (B, L, H, head_dim)
+        """
+        if self.gate_proj is None:
+            return None
+        B, L, _ = x.shape
+        gate_score = self.gate_proj(x)
+
+        parent = self._gate_stats_parent
+        if parent is not None and getattr(parent, "_collect_gate_stats", False):
+            with torch.no_grad():
+                gate = torch.sigmoid(gate_score.detach()).float()
+                mean = gate.mean()
+                var = gate.var(unbiased=False)
+                frac_lt_01 = (gate < 0.1).float().mean()
+                frac_lt_001 = (gate < 0.01).float().mean()
+                frac_gt_09 = (gate > 0.9).float().mean()
+
+                stats = {
+                    "mean": float(mean.item()),
+                    "std": float((var + 1e-12).sqrt().item()),
+                    "frac_lt_0.1": float(frac_lt_01.item()),
+                    "frac_lt_0.01": float(frac_lt_001.item()),
+                    "frac_gt_0.9": float(frac_gt_09.item()),
+                }
+                name = self._gate_stats_name or "gate"
+                gate_stats = getattr(parent, "_gate_stats", None)
+                if isinstance(gate_stats, dict):
+                    gate_stats[name] = stats
+
+        if self.attn_output_gate == "headwise":
+            return gate_score.view(B, L, self.num_heads, 1)
+        return gate_score.view(B, L, self.num_heads, self.head_dim)
 
     def post_attention(self, x: torch.Tensor) -> torch.Tensor:
         assert not self.pre_only
@@ -601,7 +660,7 @@ def vanilla_attention(q, k, v, mask, scale=None):
     return torch.bmm(p_attn, v)
 
 
-def attention(q, k, v, head_dim, mask=None, scale=None, mode="xformers"):
+def attention(q, k, v, head_dim, mask=None, scale=None, mode="xformers", gate_score: Optional[torch.Tensor] = None):
     """
     q, k, v: [B, L, D]
     """
@@ -619,6 +678,12 @@ def attention(q, k, v, head_dim, mask=None, scale=None, mode="xformers"):
         scores = memory_efficient_attention(q, k.to(q), v.to(q), mask, scale=scale)
     else:
         scores = vanilla_attention(q, k.to(q), v.to(q), mask, scale=scale)
+
+    if gate_score is not None:
+        # gate_score is provided as (B, L, H, 1) or (B, L, H, head_dim); match backend layout before applying
+        if mode == "torch" or mode == "math":
+            gate_score = gate_score.transpose(1, 2)  # (B, H, L, *)
+        scores = scores * torch.sigmoid(gate_score)
 
     scores = post_attn_layout(scores)
     return scores
@@ -643,6 +708,8 @@ class SingleDiTBlock(nn.Module):
         swiglu: bool = False,
         qk_norm: Optional[str] = None,
         x_block_self_attn: bool = False,
+        attn_output_gate: Optional[str] = None,
+        attn_output_gate_init_bias: float = 2.0,
         **block_kwargs,
     ):
         super().__init__()
@@ -652,13 +719,29 @@ class SingleDiTBlock(nn.Module):
             self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         else:
             self.norm1 = RMSNorm(hidden_size, elementwise_affine=False, eps=1e-6)
-        self.attn = AttentionLinears(dim=hidden_size, num_heads=num_heads, qkv_bias=qkv_bias, pre_only=pre_only, qk_norm=qk_norm)
+        self.attn = AttentionLinears(
+            dim=hidden_size,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            pre_only=pre_only,
+            qk_norm=qk_norm,
+            attn_output_gate=attn_output_gate,
+            attn_output_gate_init_bias=attn_output_gate_init_bias,
+        )
 
         self.x_block_self_attn = x_block_self_attn
         if self.x_block_self_attn:
             assert not pre_only
             assert not scale_mod_only
-            self.attn2 = AttentionLinears(dim=hidden_size, num_heads=num_heads, qkv_bias=qkv_bias, pre_only=False, qk_norm=qk_norm)
+            self.attn2 = AttentionLinears(
+                dim=hidden_size,
+                num_heads=num_heads,
+                qkv_bias=qkv_bias,
+                pre_only=False,
+                qk_norm=qk_norm,
+                attn_output_gate=attn_output_gate,
+                attn_output_gate_init_bias=attn_output_gate_init_bias,
+            )
 
         if not pre_only:
             if not rmsnorm:
@@ -697,16 +780,20 @@ class SingleDiTBlock(nn.Module):
                 shift_msa = None
                 shift_mlp = None
                 (scale_msa, gate_msa, scale_mlp, gate_mlp) = self.adaLN_modulation(c).chunk(4, dim=-1)
-            qkv = self.attn.pre_attention(modulate(self.norm1(x), shift_msa, scale_msa))
-            return qkv, (x, gate_msa, shift_mlp, scale_mlp, gate_mlp)
+            x_mod = modulate(self.norm1(x), shift_msa, scale_msa)
+            qkv = self.attn.pre_attention(x_mod)
+            gate_score = self.attn.compute_gate(x_mod)
+            return qkv, gate_score, (x, gate_msa, shift_mlp, scale_mlp, gate_mlp)
         else:
             if not self.scale_mod_only:
                 (shift_msa, scale_msa) = self.adaLN_modulation(c).chunk(2, dim=-1)
             else:
                 shift_msa = None
                 scale_msa = self.adaLN_modulation(c)
-            qkv = self.attn.pre_attention(modulate(self.norm1(x), shift_msa, scale_msa))
-            return qkv, None
+            x_mod = modulate(self.norm1(x), shift_msa, scale_msa)
+            qkv = self.attn.pre_attention(x_mod)
+            gate_score = self.attn.compute_gate(x_mod)
+            return qkv, gate_score, None
 
     def pre_attention_x(self, x: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
         assert self.x_block_self_attn
@@ -714,9 +801,13 @@ class SingleDiTBlock(nn.Module):
             c
         ).chunk(9, dim=1)
         x_norm = self.norm1(x)
-        qkv = self.attn.pre_attention(modulate(x_norm, shift_msa, scale_msa))
-        qkv2 = self.attn2.pre_attention(modulate(x_norm, shift_msa2, scale_msa2))
-        return qkv, qkv2, (x, gate_msa, shift_mlp, scale_mlp, gate_mlp, gate_msa2)
+        x_mod = modulate(x_norm, shift_msa, scale_msa)
+        x_mod2 = modulate(x_norm, shift_msa2, scale_msa2)
+        qkv = self.attn.pre_attention(x_mod)
+        qkv2 = self.attn2.pre_attention(x_mod2)
+        gate_score = self.attn.compute_gate(x_mod)
+        gate_score2 = self.attn2.compute_gate(x_mod2)
+        return qkv, qkv2, gate_score, gate_score2, (x, gate_msa, shift_mlp, scale_mlp, gate_mlp, gate_msa2)
 
     def post_attention(self, attn, x, gate_msa, shift_mlp, scale_mlp, gate_mlp):
         assert not self.pre_only
@@ -758,12 +849,12 @@ class MMDiTBlock(nn.Module):
         self.gradient_checkpointing = True
 
     def _forward(self, context, x, c):
-        ctx_qkv, ctx_intermediate = self.context_block.pre_attention(context, c)
+        ctx_qkv, ctx_gate_score, ctx_intermediate = self.context_block.pre_attention(context, c)
 
         if self.x_block.x_block_self_attn:
-            x_qkv, x_qkv2, x_intermediates = self.x_block.pre_attention_x(x, c)
+            x_qkv, x_qkv2, x_gate_score, x_gate_score2, x_intermediates = self.x_block.pre_attention_x(x, c)
         else:
-            x_qkv, x_intermediates = self.x_block.pre_attention(x, c)
+            x_qkv, x_gate_score, x_intermediates = self.x_block.pre_attention(x, c)
 
         ctx_len = ctx_qkv[0].size(1)
 
@@ -771,13 +862,16 @@ class MMDiTBlock(nn.Module):
         k = torch.concat((ctx_qkv[1], x_qkv[1]), dim=1)
         v = torch.concat((ctx_qkv[2], x_qkv[2]), dim=1)
 
-        attn = attention(q, k, v, head_dim=self.head_dim, mode=self.mode)
+        gate_score = None
+        if ctx_gate_score is not None and x_gate_score is not None:
+            gate_score = torch.concat((ctx_gate_score, x_gate_score), dim=1)
+        attn = attention(q, k, v, head_dim=self.head_dim, mode=self.mode, gate_score=gate_score)
         ctx_attn_out = attn[:, :ctx_len]
         x_attn_out = attn[:, ctx_len:]
 
         if self.x_block.x_block_self_attn:
             x_q2, x_k2, x_v2 = x_qkv2
-            attn2 = attention(x_q2, x_k2, x_v2, self.x_block.attn2.num_heads, mode=self.mode)
+            attn2 = attention(x_q2, x_k2, x_v2, self.x_block.attn2.num_heads, mode=self.mode, gate_score=x_gate_score2)
             x = self.x_block.post_attention_x(x_attn_out, attn2, *x_intermediates)
         else:
             x = self.x_block.post_attention(x_attn_out, *x_intermediates)
@@ -836,8 +930,12 @@ class MMDiT(nn.Module):
         pos_embed_latent_sizes: Optional[list[int]] = None,
         use_bucketed_pos_embed: bool = False,
         model_type: str = "sd3m",
+        attn_output_gate: Optional[str] = None,
+        attn_output_gate_init_bias: float = 2.0,
     ):
         super().__init__()
+        self._collect_gate_stats = False
+        self._gate_stats = {}
         self._model_type = model_type
         self.learn_sigma = learn_sigma
         self.in_channels = in_channels
@@ -913,6 +1011,8 @@ class MMDiT(nn.Module):
                     swiglu=swiglu,
                     qk_norm=qk_norm,
                     x_block_self_attn=(i in self.x_block_self_attn_layers),
+                    attn_output_gate=attn_output_gate,
+                    attn_output_gate_init_bias=attn_output_gate_init_bias,
                 )
                 for i in range(depth)
             ]
@@ -926,6 +1026,18 @@ class MMDiT(nn.Module):
         self.blocks_to_swap = None
         self.offloader = None
         self.num_blocks = len(self.joint_blocks)
+
+        for module_name, module in self.named_modules():
+            if isinstance(module, AttentionLinears) and getattr(module, "gate_proj", None) is not None:
+                module.set_gate_stats_hook(self, module_name)
+
+    def set_collect_gate_stats(self, enabled: bool):
+        self._collect_gate_stats = enabled
+
+    def pop_gate_stats(self) -> dict:
+        stats = self._gate_stats
+        self._gate_stats = {}
+        return stats
 
     def enable_scaled_pos_embed(self, use_scaled_pos_embed: bool, latent_sizes: Optional[list[int]]):
         self.use_scaled_pos_embed = use_scaled_pos_embed
@@ -1267,7 +1379,12 @@ class MMDiT(nn.Module):
         return x[:, :, :H, :W]
 
 
-def create_sd3_mmdit(params: SD3Params, attn_mode: str = "torch") -> MMDiT:
+def create_sd3_mmdit(
+    params: SD3Params,
+    attn_mode: str = "torch",
+    attn_output_gate: Optional[str] = None,
+    attn_output_gate_init_bias: float = 2.0,
+) -> MMDiT:
     mmdit = MMDiT(
         input_size=None,
         pos_embed_max_size=params.pos_embed_max_size,
@@ -1284,6 +1401,8 @@ def create_sd3_mmdit(params: SD3Params, attn_mode: str = "torch") -> MMDiT:
         attn_mode=attn_mode,
         model_type=params.model_type,
         use_bucketed_pos_embed=params.use_bucketed_pos_embed,
+        attn_output_gate=attn_output_gate,
+        attn_output_gate_init_bias=attn_output_gate_init_bias,
     )
     return mmdit
 
@@ -1538,4 +1657,3 @@ class SDVAE(torch.nn.Module):
 
 
 # endregion
-
