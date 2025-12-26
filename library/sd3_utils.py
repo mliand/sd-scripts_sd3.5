@@ -1,7 +1,18 @@
 import sys
+import threading
+
 # MUST set recursion limit FIRST before any other imports
 # SD3.5 Large with gate parameters has very deep module hierarchies
 sys.setrecursionlimit(50000)
+
+# Also try to increase thread stack size for Linux systems
+try:
+    import resource
+    # Try to increase stack size to 64MB
+    soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
+    resource.setrlimit(resource.RLIMIT_STACK, (min(64 * 1024 * 1024, hard), hard))
+except Exception:
+    pass
 
 from dataclasses import dataclass
 import math
@@ -110,53 +121,64 @@ def load_mmdit(
             else:
                 logger.warning(f"Found gate_proj in checkpoint but couldn't infer gate type from shape: {mmdit_sd[gate_weight_key].shape}")
 
-    # Build model on target device directly if not CPU
-    # This avoids the slow CPU->GPU transfer after loading
-    build_device = device if (device is not None and str(device) != "cpu") else "cpu"
-    build_dtype = dtype if dtype is not None else torch.float32
+    # Determine target device/dtype
+    target_device = device if device is not None else "cpu"
+    target_dtype = dtype if dtype is not None else torch.float32
 
-    logger.info(f"Building MMDiT on {build_device} with dtype {build_dtype}...")
-    mmdit = sd3_models.create_sd3_mmdit(
-        params,
-        attn_mode,
-        attn_output_gate=attn_output_gate,
-        attn_output_gate_init_bias=attn_output_gate_init_bias,
-    )
-
-    # Move model to target device/dtype BEFORE loading state dict
-    mmdit.to(device=build_device, dtype=build_dtype)
-
-    # Move state dict to target device/dtype to match model
-    if build_device != "cpu":
-        logger.info(f"Moving state dict to {build_device}...")
+    # Move state dict to target device/dtype first
+    if str(target_device) != "cpu":
+        logger.info(f"Moving state dict to {target_device} {target_dtype}...")
         for k in mmdit_sd:
-            mmdit_sd[k] = mmdit_sd[k].to(device=build_device, dtype=build_dtype)
+            mmdit_sd[k] = mmdit_sd[k].to(device=target_device, dtype=target_dtype)
 
-    logger.info("Loading state dict...")
+    # Use a thread with larger stack to avoid recursion limit issues
+    # PyTorch's module operations use recursion internally
+    result = [None, None]  # [mmdit, error]
 
-    # Manual non-recursive state dict loading to avoid recursion depth issues
-    # PyTorch's load_state_dict uses deep recursion which can hit system stack limits
-    model_state = mmdit.state_dict()
-    missing_keys = []
-    unexpected_keys = []
+    def load_in_thread():
+        try:
+            logger.info("Building MMDiT on CPU...")
+            mmdit = sd3_models.create_sd3_mmdit(
+                params,
+                attn_mode,
+                attn_output_gate=attn_output_gate,
+                attn_output_gate_init_bias=attn_output_gate_init_bias,
+            )
 
-    for key in mmdit_sd:
-        if key in model_state:
-            # Direct tensor copy - no recursion
-            model_state[key].copy_(mmdit_sd[key])
-        else:
-            unexpected_keys.append(key)
+            logger.info(f"Moving model to {target_device} {target_dtype}...")
+            mmdit.to(device=target_device, dtype=target_dtype)
 
-    for key in model_state:
-        if key not in mmdit_sd:
-            missing_keys.append(key)
+            logger.info("Loading state dict...")
+            info = mmdit.load_state_dict(mmdit_sd, strict=False)
+            logger.info(f"Loaded MMDiT: {info}")
 
-    # Log results similar to load_state_dict
-    if missing_keys:
-        logger.info(f"Missing keys ({len(missing_keys)}): {missing_keys[:10]}{'...' if len(missing_keys) > 10 else ''}")
-    if unexpected_keys:
-        logger.info(f"Unexpected keys ({len(unexpected_keys)}): {unexpected_keys[:10]}{'...' if len(unexpected_keys) > 10 else ''}")
-    logger.info(f"Loaded MMDiT: missing={len(missing_keys)}, unexpected={len(unexpected_keys)}")
+            result[0] = mmdit
+        except Exception as e:
+            result[1] = e
+
+    # Run in thread with larger stack (default is usually 8MB)
+    # Set thread stack size to 64MB to handle deep recursion
+    old_stack_size = threading.stack_size()
+    try:
+        threading.stack_size(64 * 1024 * 1024)  # 64MB
+    except (ValueError, OSError):
+        # Some systems may not support changing stack size
+        pass
+
+    thread = threading.Thread(target=load_in_thread)
+    thread.start()
+    thread.join()
+
+    # Restore original stack size
+    try:
+        threading.stack_size(old_stack_size)
+    except (ValueError, OSError):
+        pass
+
+    if result[1] is not None:
+        raise result[1]
+
+    mmdit = result[0]
 
     return mmdit
 
