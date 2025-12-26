@@ -114,7 +114,8 @@ def load_mmdit(
         )
 
     logger.info("Loading state dict...")
-    info = mmdit.load_state_dict(mmdit_sd, strict=False, assign=True)
+    # assign=True can hit a recursion bug when new params (e.g., gate_proj) are missing in older checkpoints
+    info = mmdit.load_state_dict(mmdit_sd, strict=False)
     logger.info(f"Loaded MMDiT: {info}")
     return mmdit
 
