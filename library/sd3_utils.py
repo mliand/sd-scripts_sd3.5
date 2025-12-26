@@ -1,3 +1,4 @@
+import sys
 from dataclasses import dataclass
 import math
 import re
@@ -14,6 +15,8 @@ setup_logging()
 import logging
 
 logger = logging.getLogger(__name__)
+
+sys.setrecursionlimit(max(sys.getrecursionlimit(), 10000))
 
 from library import sd3_models
 
