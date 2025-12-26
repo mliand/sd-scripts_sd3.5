@@ -1,4 +1,8 @@
 import sys
+# MUST set recursion limit FIRST before any other imports
+# SD3.5 Large with gate parameters has very deep module hierarchies
+sys.setrecursionlimit(50000)
+
 from dataclasses import dataclass
 import math
 import re
@@ -15,8 +19,6 @@ setup_logging()
 import logging
 
 logger = logging.getLogger(__name__)
-
-sys.setrecursionlimit(max(sys.getrecursionlimit(), 50000))
 
 from library import sd3_models
 
@@ -108,7 +110,12 @@ def load_mmdit(
             else:
                 logger.warning(f"Found gate_proj in checkpoint but couldn't infer gate type from shape: {mmdit_sd[gate_weight_key].shape}")
 
-    # Build model on CPU first, then load and move to target device
+    # Build model on target device directly if not CPU
+    # This avoids the slow CPU->GPU transfer after loading
+    build_device = device if (device is not None and str(device) != "cpu") else "cpu"
+    build_dtype = dtype if dtype is not None else torch.float32
+
+    logger.info(f"Building MMDiT on {build_device} with dtype {build_dtype}...")
     mmdit = sd3_models.create_sd3_mmdit(
         params,
         attn_mode,
@@ -116,20 +123,40 @@ def load_mmdit(
         attn_output_gate_init_bias=attn_output_gate_init_bias,
     )
 
-    # Move state dict to target device/dtype for faster loading
-    if device is not None and str(device) != "cpu":
-        logger.info(f"Moving state dict to {device}...")
+    # Move model to target device/dtype BEFORE loading state dict
+    mmdit.to(device=build_device, dtype=build_dtype)
+
+    # Move state dict to target device/dtype to match model
+    if build_device != "cpu":
+        logger.info(f"Moving state dict to {build_device}...")
         for k in mmdit_sd:
-            mmdit_sd[k] = mmdit_sd[k].to(device=device, dtype=dtype)
+            mmdit_sd[k] = mmdit_sd[k].to(device=build_device, dtype=build_dtype)
 
     logger.info("Loading state dict...")
-    # Use assign=True for faster loading (recursion limit increased to 50000)
-    info = mmdit.load_state_dict(mmdit_sd, strict=False, assign=True)
-    logger.info(f"Loaded MMDiT: {info}")
 
-    # Move model to target device/dtype
-    if device is not None or dtype is not None:
-        mmdit.to(device=device, dtype=dtype)
+    # Manual non-recursive state dict loading to avoid recursion depth issues
+    # PyTorch's load_state_dict uses deep recursion which can hit system stack limits
+    model_state = mmdit.state_dict()
+    missing_keys = []
+    unexpected_keys = []
+
+    for key in mmdit_sd:
+        if key in model_state:
+            # Direct tensor copy - no recursion
+            model_state[key].copy_(mmdit_sd[key])
+        else:
+            unexpected_keys.append(key)
+
+    for key in model_state:
+        if key not in mmdit_sd:
+            missing_keys.append(key)
+
+    # Log results similar to load_state_dict
+    if missing_keys:
+        logger.info(f"Missing keys ({len(missing_keys)}): {missing_keys[:10]}{'...' if len(missing_keys) > 10 else ''}")
+    if unexpected_keys:
+        logger.info(f"Unexpected keys ({len(unexpected_keys)}): {unexpected_keys[:10]}{'...' if len(unexpected_keys) > 10 else ''}")
+    logger.info(f"Loaded MMDiT: missing={len(missing_keys)}, unexpected={len(unexpected_keys)}")
 
     return mmdit
 
