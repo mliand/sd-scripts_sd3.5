@@ -16,7 +16,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-sys.setrecursionlimit(max(sys.getrecursionlimit(), 10000))
+sys.setrecursionlimit(max(sys.getrecursionlimit(), 50000))
 
 from library import sd3_models
 

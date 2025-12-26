@@ -1,5 +1,10 @@
 # training with captions
 
+import sys
+# Increase recursion limit early, before importing any modules that might load models
+# SD3.5 Large with gate parameters can have very deep module hierarchies
+sys.setrecursionlimit(50000)
+
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import copy
