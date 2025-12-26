@@ -1,18 +1,7 @@
 import sys
-import threading
 
-# MUST set recursion limit FIRST before any other imports
-# SD3.5 Large with gate parameters has very deep module hierarchies
+# Set high recursion limit for any remaining recursive operations
 sys.setrecursionlimit(50000)
-
-# Also try to increase thread stack size for Linux systems
-try:
-    import resource
-    # Try to increase stack size to 64MB
-    soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
-    resource.setrlimit(resource.RLIMIT_STACK, (min(64 * 1024 * 1024, hard), hard))
-except Exception:
-    pass
 
 from dataclasses import dataclass
 import math
@@ -125,60 +114,84 @@ def load_mmdit(
     target_device = device if device is not None else "cpu"
     target_dtype = dtype if dtype is not None else torch.float32
 
-    # Move state dict to target device/dtype first
-    if str(target_device) != "cpu":
-        logger.info(f"Moving state dict to {target_device} {target_dtype}...")
-        for k in mmdit_sd:
-            mmdit_sd[k] = mmdit_sd[k].to(device=target_device, dtype=target_dtype)
+    # Build model on CPU first
+    logger.info("Building MMDiT on CPU...")
+    mmdit = sd3_models.create_sd3_mmdit(
+        params,
+        attn_mode,
+        attn_output_gate=attn_output_gate,
+        attn_output_gate_init_bias=attn_output_gate_init_bias,
+    )
 
-    # Use a thread with larger stack to avoid recursion limit issues
-    # PyTorch's module operations use recursion internally
-    result = [None, None]  # [mmdit, error]
+    # NON-RECURSIVE device/dtype transfer and state dict loading
+    # PyTorch's .to() and load_state_dict() use deep recursion that hits system limits
 
-    def load_in_thread():
-        try:
-            logger.info("Building MMDiT on CPU...")
-            mmdit = sd3_models.create_sd3_mmdit(
-                params,
-                attn_mode,
-                attn_output_gate=attn_output_gate,
-                attn_output_gate_init_bias=attn_output_gate_init_bias,
-            )
+    logger.info(f"Loading and moving to {target_device} {target_dtype} (non-recursive)...")
 
-            logger.info(f"Moving model to {target_device} {target_dtype}...")
-            mmdit.to(device=target_device, dtype=target_dtype)
+    # Get all parameters and buffers using iteration with explicit stack (not recursion)
+    def get_all_modules_iterative(model):
+        """Get all modules using iterative BFS instead of recursion"""
+        modules = {}
+        queue = [("", model)]
+        while queue:
+            prefix, module = queue.pop(0)
+            modules[prefix] = module
+            for name, child in module._modules.items():
+                if child is not None:
+                    child_prefix = f"{prefix}.{name}" if prefix else name
+                    queue.append((child_prefix, child))
+        return modules
 
-            logger.info("Loading state dict...")
-            info = mmdit.load_state_dict(mmdit_sd, strict=False)
-            logger.info(f"Loaded MMDiT: {info}")
+    all_modules = get_all_modules_iterative(mmdit)
+    logger.info(f"Found {len(all_modules)} modules")
 
-            result[0] = mmdit
-        except Exception as e:
-            result[1] = e
+    # Load state dict and transfer to device - iterate through all leaf parameters/buffers
+    missing_keys = []
+    matched_keys = set()
 
-    # Run in thread with larger stack (default is usually 8MB)
-    # Set thread stack size to 64MB to handle deep recursion
-    old_stack_size = threading.stack_size()
-    try:
-        threading.stack_size(64 * 1024 * 1024)  # 64MB
-    except (ValueError, OSError):
-        # Some systems may not support changing stack size
-        pass
+    for module_prefix, module in all_modules.items():
+        # Handle parameters
+        for param_name, param in module._parameters.items():
+            if param is None:
+                continue
+            full_name = f"{module_prefix}.{param_name}" if module_prefix else param_name
+            if full_name in mmdit_sd:
+                # Load from state dict and move to target device/dtype
+                module._parameters[param_name] = torch.nn.Parameter(
+                    mmdit_sd[full_name].to(device=target_device, dtype=target_dtype),
+                    requires_grad=param.requires_grad
+                )
+                matched_keys.add(full_name)
+            else:
+                # Parameter not in state dict, just move to device
+                module._parameters[param_name] = torch.nn.Parameter(
+                    param.to(device=target_device, dtype=target_dtype),
+                    requires_grad=param.requires_grad
+                )
+                missing_keys.append(full_name)
 
-    thread = threading.Thread(target=load_in_thread)
-    thread.start()
-    thread.join()
+        # Handle buffers
+        for buf_name, buf in module._buffers.items():
+            if buf is None:
+                continue
+            full_name = f"{module_prefix}.{buf_name}" if module_prefix else buf_name
+            if full_name in mmdit_sd:
+                module._buffers[buf_name] = mmdit_sd[full_name].to(device=target_device, dtype=target_dtype)
+                matched_keys.add(full_name)
+            else:
+                module._buffers[buf_name] = buf.to(device=target_device, dtype=target_dtype)
+                if full_name not in missing_keys:
+                    missing_keys.append(full_name)
 
-    # Restore original stack size
-    try:
-        threading.stack_size(old_stack_size)
-    except (ValueError, OSError):
-        pass
+    # Find unexpected keys
+    unexpected_keys = [k for k in mmdit_sd.keys() if k not in matched_keys]
 
-    if result[1] is not None:
-        raise result[1]
-
-    mmdit = result[0]
+    # Log results
+    if missing_keys:
+        logger.info(f"Missing keys ({len(missing_keys)}): {missing_keys[:5]}{'...' if len(missing_keys) > 5 else ''}")
+    if unexpected_keys:
+        logger.info(f"Unexpected keys ({len(unexpected_keys)}): {unexpected_keys[:5]}{'...' if len(unexpected_keys) > 5 else ''}")
+    logger.info(f"Loaded MMDiT: matched={len(matched_keys)}, missing={len(missing_keys)}, unexpected={len(unexpected_keys)}")
 
     return mmdit
 
