@@ -108,7 +108,7 @@ def load_mmdit(
             else:
                 logger.warning(f"Found gate_proj in checkpoint but couldn't infer gate type from shape: {mmdit_sd[gate_weight_key].shape}")
 
-    # Build on CPU with real params to avoid meta-tensor load_state_dict recursion issues
+    # Build model on CPU first, then load and move to target device
     mmdit = sd3_models.create_sd3_mmdit(
         params,
         attn_mode,
@@ -116,10 +116,21 @@ def load_mmdit(
         attn_output_gate_init_bias=attn_output_gate_init_bias,
     )
 
+    # Move state dict to target device/dtype for faster loading
+    if device is not None and str(device) != "cpu":
+        logger.info(f"Moving state dict to {device}...")
+        for k in mmdit_sd:
+            mmdit_sd[k] = mmdit_sd[k].to(device=device, dtype=dtype)
+
     logger.info("Loading state dict...")
-    # assign=True can hit a recursion bug when new params (e.g., gate_proj) are missing in older checkpoints
-    info = mmdit.load_state_dict(mmdit_sd, strict=False)
+    # Use assign=True for faster loading (recursion limit increased to 50000)
+    info = mmdit.load_state_dict(mmdit_sd, strict=False, assign=True)
     logger.info(f"Loaded MMDiT: {info}")
+
+    # Move model to target device/dtype
+    if device is not None or dtype is not None:
+        mmdit.to(device=device, dtype=dtype)
+
     return mmdit
 
 
