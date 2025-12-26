@@ -105,13 +105,13 @@ def load_mmdit(
             else:
                 logger.warning(f"Found gate_proj in checkpoint but couldn't infer gate type from shape: {mmdit_sd[gate_weight_key].shape}")
 
-    with init_empty_weights():
-        mmdit = sd3_models.create_sd3_mmdit(
-            params,
-            attn_mode,
-            attn_output_gate=attn_output_gate,
-            attn_output_gate_init_bias=attn_output_gate_init_bias,
-        )
+    # Build on CPU with real params to avoid meta-tensor load_state_dict recursion issues
+    mmdit = sd3_models.create_sd3_mmdit(
+        params,
+        attn_mode,
+        attn_output_gate=attn_output_gate,
+        attn_output_gate_init_bias=attn_output_gate_init_bias,
+    )
 
     logger.info("Loading state dict...")
     # assign=True can hit a recursion bug when new params (e.g., gate_proj) are missing in older checkpoints
