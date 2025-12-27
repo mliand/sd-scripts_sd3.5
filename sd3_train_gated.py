@@ -538,6 +538,13 @@ def train(args):
         for step, batch in enumerate(train_dataloader):
             current_step.value = global_step
 
+            # Enable gate stats logging only when needed (to save memory)
+            should_log_gate_stats = args.log_gate_stats and (global_step + 1) % args.log_gate_stats_interval == 0
+            if should_log_gate_stats:
+                unwrapped_mmdit = accelerator.unwrap_model(mmdit)
+                if hasattr(unwrapped_mmdit, 'set_log_gate_stats'):
+                    unwrapped_mmdit.set_log_gate_stats(True)
+
             with accelerator.accumulate(*training_models):
                 if "latents" in batch and batch["latents"] is not None:
                     latents = batch["latents"].to(accelerator.device, dtype=weight_dtype)
@@ -672,8 +679,8 @@ def train(args):
                 logs = {"loss": current_loss}
                 train_util.append_lr_to_logs(logs, lr_scheduler, args.optimizer_type, including_unet=train_mmdit)
 
-                # Add gate statistics to tensorboard
-                if args.log_gate_stats and global_step % args.log_gate_stats_interval == 0:
+                # Add gate statistics to tensorboard (only at intervals to save memory)
+                if should_log_gate_stats:
                     unwrapped_mmdit = accelerator.unwrap_model(mmdit)
                     if hasattr(unwrapped_mmdit, 'get_gate_statistics'):
                         gate_stats = unwrapped_mmdit.get_gate_statistics()
@@ -688,6 +695,10 @@ def train(args):
                             for key, value in gate_stats.items():
                                 if key not in ["gate_mean_overall", "gate_sparsity_overall"]:
                                     logs[f"gate/{key}"] = value
+
+                    # Disable gate stats logging after collecting
+                    if hasattr(unwrapped_mmdit, 'set_log_gate_stats'):
+                        unwrapped_mmdit.set_log_gate_stats(False)
 
                 accelerator.log(logs, step=global_step)
 

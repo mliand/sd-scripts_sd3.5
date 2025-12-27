@@ -244,9 +244,10 @@ class GatedSingleDiTBlock(nn.Module):
         self.adaLN_modulation = nn.Sequential(nn.SiLU(), nn.Linear(hidden_size, n_mods * hidden_size))
         self.pre_only = pre_only
 
-        # Store gate scores for logging
-        self._last_gate_score = None
-        self._last_gate_score2 = None
+        # Store gate statistics for logging (not the tensors themselves to avoid memory issues)
+        self._last_gate_stats = None
+        self._last_gate_stats2 = None
+        self._log_gate_stats = False  # Flag to control logging
 
     def pre_attention(self, x: torch.Tensor, c: torch.Tensor) -> Tuple:
         if not self.pre_only:
@@ -257,7 +258,10 @@ class GatedSingleDiTBlock(nn.Module):
                 shift_mlp = None
                 (scale_msa, gate_msa, scale_mlp, gate_mlp) = self.adaLN_modulation(c).chunk(4, dim=-1)
             q, k, v, gate_score = self.attn.pre_attention(modulate(self.norm1(x), shift_msa, scale_msa))
-            self._last_gate_score = gate_score
+            # Store statistics only, not the tensor itself (to save memory during gradient checkpointing)
+            if self._log_gate_stats and gate_score is not None:
+                with torch.no_grad():
+                    self._last_gate_stats = self.attn.get_gate_statistics(gate_score)
             return (q, k, v, gate_score), (x, gate_msa, shift_mlp, scale_mlp, gate_mlp)
         else:
             if not self.scale_mod_only:
@@ -266,7 +270,9 @@ class GatedSingleDiTBlock(nn.Module):
                 shift_msa = None
                 scale_msa = self.adaLN_modulation(c)
             q, k, v, gate_score = self.attn.pre_attention(modulate(self.norm1(x), shift_msa, scale_msa))
-            self._last_gate_score = gate_score
+            if self._log_gate_stats and gate_score is not None:
+                with torch.no_grad():
+                    self._last_gate_stats = self.attn.get_gate_statistics(gate_score)
             return (q, k, v, gate_score), None
 
     def pre_attention_x(self, x: torch.Tensor, c: torch.Tensor) -> Tuple:
@@ -277,8 +283,13 @@ class GatedSingleDiTBlock(nn.Module):
         x_norm = self.norm1(x)
         q, k, v, gate_score = self.attn.pre_attention(modulate(x_norm, shift_msa, scale_msa))
         q2, k2, v2, gate_score2 = self.attn2.pre_attention(modulate(x_norm, shift_msa2, scale_msa2))
-        self._last_gate_score = gate_score
-        self._last_gate_score2 = gate_score2
+        # Store statistics only
+        if self._log_gate_stats:
+            with torch.no_grad():
+                if gate_score is not None:
+                    self._last_gate_stats = self.attn.get_gate_statistics(gate_score)
+                if gate_score2 is not None:
+                    self._last_gate_stats2 = self.attn2.get_gate_statistics(gate_score2)
         return (q, k, v, gate_score), (q2, k2, v2, gate_score2), (x, gate_msa, shift_mlp, scale_mlp, gate_mlp, gate_msa2)
 
     def post_attention(self, attn, gate_score, x, gate_msa, shift_mlp, scale_mlp, gate_mlp):
@@ -307,13 +318,17 @@ class GatedSingleDiTBlock(nn.Module):
         x = x + mlp_
         return x
 
+    def set_log_gate_stats(self, enabled: bool):
+        """Enable or disable gate statistics logging."""
+        self._log_gate_stats = enabled
+
     def get_gate_statistics(self) -> Dict[str, Dict[str, float]]:
         """Get gate statistics for tensorboard logging."""
         stats = {}
-        if self._last_gate_score is not None:
-            stats["attn1"] = self.attn.get_gate_statistics(self._last_gate_score)
-        if self._last_gate_score2 is not None:
-            stats["attn2"] = self.attn2.get_gate_statistics(self._last_gate_score2)
+        if self._last_gate_stats is not None:
+            stats["attn1"] = self._last_gate_stats
+        if self._last_gate_stats2 is not None:
+            stats["attn2"] = self._last_gate_stats2
         return stats
 
 
@@ -339,6 +354,11 @@ class GatedMMDiTBlock(nn.Module):
 
     def enable_gradient_checkpointing(self):
         self.gradient_checkpointing = True
+
+    def set_log_gate_stats(self, enabled: bool):
+        """Enable or disable gate statistics logging."""
+        self.context_block.set_log_gate_stats(enabled)
+        self.x_block.set_log_gate_stats(enabled)
 
     def _forward(self, context, x, c):
         ctx_qkv_gate, ctx_intermediate = self.context_block.pre_attention(context, c)
@@ -903,6 +923,12 @@ class GatedMMDiT(nn.Module):
 
         x = self.final_layer(x, c, H, W)
         return x[:, :, :H, :W]
+
+    def set_log_gate_stats(self, enabled: bool):
+        """Enable or disable gate statistics logging for all blocks."""
+        for block in self.joint_blocks:
+            if hasattr(block, 'set_log_gate_stats'):
+                block.set_log_gate_stats(enabled)
 
     def get_gate_statistics(self) -> Dict[str, float]:
         """Get aggregated gate statistics for tensorboard logging."""
