@@ -75,6 +75,14 @@ def analyze_state_dict_state(state_dict: Dict, prefix: str = ""):
     return params
 
 
+def detect_sd3_model_type(state_dict: Dict, prefix: str = "") -> sd3_models.SD3Params:
+    """
+    Detect SD3 model type from state dict.
+    Alias for analyze_state_dict_state for use with GatedMMDiT.
+    """
+    return analyze_state_dict_state(state_dict, prefix)
+
+
 def load_mmdit(
     state_dict: Dict, dtype: Optional[Union[str, torch.dtype]], device: Union[str, torch.device], attn_mode: str = "torch"
 ) -> sd3_models.MMDiT:
