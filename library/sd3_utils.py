@@ -1,7 +1,19 @@
 import sys
+import os
 
-# Set high recursion limit for any remaining recursive operations
+# Set high recursion limit
 sys.setrecursionlimit(50000)
+
+# Try to increase stack size on Linux/Unix
+try:
+    import resource
+    # Get current limits
+    soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
+    # Set to maximum allowed (or 256MB if unlimited)
+    new_soft = hard if hard != resource.RLIM_INFINITY else 256 * 1024 * 1024
+    resource.setrlimit(resource.RLIMIT_STACK, (new_soft, hard))
+except Exception:
+    pass
 
 from dataclasses import dataclass
 import math
@@ -110,12 +122,7 @@ def load_mmdit(
             else:
                 logger.warning(f"Found gate_proj in checkpoint but couldn't infer gate type from shape: {mmdit_sd[gate_weight_key].shape}")
 
-    # Determine target device/dtype
-    target_device = device if device is not None else "cpu"
-    target_dtype = dtype if dtype is not None else torch.float32
-
     # Build model on CPU first
-    logger.info("Building MMDiT on CPU...")
     mmdit = sd3_models.create_sd3_mmdit(
         params,
         attn_mode,
@@ -123,75 +130,9 @@ def load_mmdit(
         attn_output_gate_init_bias=attn_output_gate_init_bias,
     )
 
-    # NON-RECURSIVE device/dtype transfer and state dict loading
-    # PyTorch's .to() and load_state_dict() use deep recursion that hits system limits
-
-    logger.info(f"Loading and moving to {target_device} {target_dtype} (non-recursive)...")
-
-    # Get all parameters and buffers using iteration with explicit stack (not recursion)
-    def get_all_modules_iterative(model):
-        """Get all modules using iterative BFS instead of recursion"""
-        modules = {}
-        queue = [("", model)]
-        while queue:
-            prefix, module = queue.pop(0)
-            modules[prefix] = module
-            for name, child in module._modules.items():
-                if child is not None:
-                    child_prefix = f"{prefix}.{name}" if prefix else name
-                    queue.append((child_prefix, child))
-        return modules
-
-    all_modules = get_all_modules_iterative(mmdit)
-    logger.info(f"Found {len(all_modules)} modules")
-
-    # Load state dict and transfer to device - iterate through all leaf parameters/buffers
-    missing_keys = []
-    matched_keys = set()
-
-    for module_prefix, module in all_modules.items():
-        # Handle parameters
-        for param_name, param in module._parameters.items():
-            if param is None:
-                continue
-            full_name = f"{module_prefix}.{param_name}" if module_prefix else param_name
-            if full_name in mmdit_sd:
-                # Load from state dict and move to target device/dtype
-                module._parameters[param_name] = torch.nn.Parameter(
-                    mmdit_sd[full_name].to(device=target_device, dtype=target_dtype),
-                    requires_grad=param.requires_grad
-                )
-                matched_keys.add(full_name)
-            else:
-                # Parameter not in state dict, just move to device
-                module._parameters[param_name] = torch.nn.Parameter(
-                    param.to(device=target_device, dtype=target_dtype),
-                    requires_grad=param.requires_grad
-                )
-                missing_keys.append(full_name)
-
-        # Handle buffers
-        for buf_name, buf in module._buffers.items():
-            if buf is None:
-                continue
-            full_name = f"{module_prefix}.{buf_name}" if module_prefix else buf_name
-            if full_name in mmdit_sd:
-                module._buffers[buf_name] = mmdit_sd[full_name].to(device=target_device, dtype=target_dtype)
-                matched_keys.add(full_name)
-            else:
-                module._buffers[buf_name] = buf.to(device=target_device, dtype=target_dtype)
-                if full_name not in missing_keys:
-                    missing_keys.append(full_name)
-
-    # Find unexpected keys
-    unexpected_keys = [k for k in mmdit_sd.keys() if k not in matched_keys]
-
-    # Log results
-    if missing_keys:
-        logger.info(f"Missing keys ({len(missing_keys)}): {missing_keys[:5]}{'...' if len(missing_keys) > 5 else ''}")
-    if unexpected_keys:
-        logger.info(f"Unexpected keys ({len(unexpected_keys)}): {unexpected_keys[:5]}{'...' if len(unexpected_keys) > 5 else ''}")
-    logger.info(f"Loaded MMDiT: matched={len(matched_keys)}, missing={len(missing_keys)}, unexpected={len(unexpected_keys)}")
+    logger.info("Loading state dict...")
+    info = mmdit.load_state_dict(mmdit_sd, strict=False)
+    logger.info(f"Loaded MMDiT: {info}")
 
     return mmdit
 

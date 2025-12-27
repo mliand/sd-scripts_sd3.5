@@ -5,6 +5,15 @@ import sys
 # SD3.5 Large with gate parameters can have very deep module hierarchies
 sys.setrecursionlimit(50000)
 
+# Try to increase stack size on Linux/Unix
+try:
+    import resource
+    soft, hard = resource.getrlimit(resource.RLIMIT_STACK)
+    new_soft = hard if hard != resource.RLIM_INFINITY else 256 * 1024 * 1024
+    resource.setrlimit(resource.RLIMIT_STACK, (new_soft, hard))
+except Exception:
+    pass
+
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import copy
@@ -345,12 +354,10 @@ def train(args):
 
     # load MMDIT
     attn_output_gate = None if args.mmdit_attn_output_gate == "none" else args.mmdit_attn_output_gate
-    # Load directly to GPU when highvram is enabled for faster loading
-    mmdit_load_device = accelerator.device if args.highvram else "cpu"
     mmdit = sd3_utils.load_mmdit(
         sd3_state_dict,
         model_dtype,
-        mmdit_load_device,
+        "cpu",
         attn_output_gate=attn_output_gate,
         attn_output_gate_init_bias=args.mmdit_attn_output_gate_init_bias,
     )
