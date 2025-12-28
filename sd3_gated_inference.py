@@ -1,0 +1,454 @@
+# Inference Code for SD3.5 with Gated Attention
+
+import argparse
+import datetime
+import math
+import os
+import random
+from typing import Optional, Tuple
+import numpy as np
+
+import torch
+from safetensors.torch import safe_open, load_file
+import torch.amp
+from tqdm import tqdm
+from PIL import Image
+from transformers import CLIPTextModelWithProjection, T5EncoderModel
+
+from library.device_utils import init_ipex, get_preferred_device
+
+init_ipex()
+
+from library.utils import setup_logging
+
+setup_logging()
+import logging
+
+logger = logging.getLogger(__name__)
+
+from library import sd3_models, sd3_utils, strategy_sd3, sd3_models_gated
+from library.utils import load_safetensors
+
+
+def get_noise(seed, latent, device="cpu"):
+    generator = torch.Generator(device)
+    generator.manual_seed(seed)
+    return torch.randn(latent.size(), dtype=latent.dtype, layout=latent.layout, generator=generator, device=device)
+
+
+def get_sigmas(sampling: sd3_utils.ModelSamplingDiscreteFlow, steps):
+    start = sampling.timestep(sampling.sigma_max)
+    end = sampling.timestep(sampling.sigma_min)
+    timesteps = torch.linspace(start, end, steps)
+    sigs = []
+    for x in range(len(timesteps)):
+        ts = timesteps[x]
+        sigs.append(sampling.sigma(ts))
+    sigs += [0.0]
+    return torch.FloatTensor(sigs)
+
+
+def max_denoise(model_sampling, sigmas):
+    max_sigma = float(model_sampling.sigma_max)
+    sigma = float(sigmas[0])
+    return math.isclose(max_sigma, sigma, rel_tol=1e-05) or sigma > max_sigma
+
+
+def do_sample(
+    height: int,
+    width: int,
+    initial_latent: Optional[torch.Tensor],
+    seed: int,
+    cond: Tuple[torch.Tensor, torch.Tensor],
+    neg_cond: Tuple[torch.Tensor, torch.Tensor],
+    mmdit,  # GatedMMDiT or MMDiT
+    steps: int,
+    cfg_scale: float,
+    dtype: torch.dtype,
+    device: str,
+    vae: sd3_models.SDVAE,
+):
+    if initial_latent is None:
+        latent = torch.zeros(1, 16, height // 8, width // 8, device=device)
+    else:
+        latent = initial_latent
+
+    latent = latent.to(dtype).to(device)
+
+    noise = get_noise(seed, latent, device)
+
+    model_sampling = sd3_utils.ModelSamplingDiscreteFlow(shift=3.0)  # 3.0 is for SD3
+
+    sigmas = get_sigmas(model_sampling, steps).to(device)
+
+    noise_scaled = model_sampling.noise_scaling(sigmas[0], noise, latent, max_denoise(model_sampling, sigmas))
+
+    c_crossattn = torch.cat([cond[0], neg_cond[0]]).to(device).to(dtype)
+    y = torch.cat([cond[1], neg_cond[1]]).to(device).to(dtype)
+
+    x = noise_scaled.to(device).to(dtype)
+
+    with torch.no_grad():
+        for i in tqdm(range(len(sigmas) - 1)):
+            sigma_hat = sigmas[i]
+
+            timestep = model_sampling.timestep(sigma_hat).float()
+            timestep = torch.FloatTensor([timestep, timestep]).to(device)
+
+            x_c_nc = torch.cat([x, x], dim=0)
+
+            with torch.autocast(device_type=device.type, dtype=dtype):
+                model_output = mmdit(x_c_nc, timestep, context=c_crossattn, y=y)
+            model_output = model_output.float()
+            batched = model_sampling.calculate_denoised(sigma_hat, model_output, x)
+
+            pos_out, neg_out = batched.chunk(2)
+            denoised = neg_out + (pos_out - neg_out) * cfg_scale
+
+            dims_to_append = x.ndim - sigma_hat.ndim
+            sigma_hat_dims = sigma_hat[(...,) + (None,) * dims_to_append]
+            d = (x - denoised) / sigma_hat_dims
+
+            dt = sigmas[i + 1] - sigma_hat
+
+            # Euler method
+            x = x + d * dt
+            x = x.to(dtype)
+
+    latent = x
+    latent = vae.process_out(latent)
+    return latent
+
+
+def generate_image(
+    mmdit,
+    vae: sd3_models.SDVAE,
+    clip_l: CLIPTextModelWithProjection,
+    clip_g: CLIPTextModelWithProjection,
+    t5xxl: T5EncoderModel,
+    steps: int,
+    prompt: str,
+    seed: int,
+    target_width: int,
+    target_height: int,
+    device: str,
+    negative_prompt: str,
+    cfg_scale: float,
+    tokenize_strategy,
+    encoding_strategy,
+    args,
+    sd3_dtype: torch.dtype,
+):
+    # prepare embeddings
+    logger.info("Encoding prompts...")
+
+    clip_l.to(device)
+    clip_g.to(device)
+    t5xxl.to(device)
+
+    with torch.autocast(device_type=device.type, dtype=sd3_dtype), torch.no_grad():
+        tokens_and_masks = tokenize_strategy.tokenize(prompt)
+        lg_out, t5_out, pooled, l_attn_mask, g_attn_mask, t5_attn_mask = encoding_strategy.encode_tokens(
+            tokenize_strategy, [clip_l, clip_g, t5xxl], tokens_and_masks, args.apply_lg_attn_mask, args.apply_t5_attn_mask
+        )
+        cond = encoding_strategy.concat_encodings(lg_out, t5_out, pooled)
+
+        tokens_and_masks = tokenize_strategy.tokenize(negative_prompt)
+        lg_out, t5_out, pooled, neg_l_attn_mask, neg_g_attn_mask, neg_t5_attn_mask = encoding_strategy.encode_tokens(
+            tokenize_strategy, [clip_l, clip_g, t5xxl], tokens_and_masks, args.apply_lg_attn_mask, args.apply_t5_attn_mask
+        )
+        neg_cond = encoding_strategy.concat_encodings(lg_out, t5_out, pooled)
+
+    if args.offload:
+        clip_l.to("cpu")
+        clip_g.to("cpu")
+        t5xxl.to("cpu")
+
+    # generate image
+    logger.info("Generating image...")
+    mmdit.to(device)
+    latent_sampled = do_sample(target_height, target_width, None, seed, cond, neg_cond, mmdit, steps, cfg_scale, sd3_dtype, device, vae)
+    if args.offload:
+        mmdit.to("cpu")
+
+    # latent to image
+    vae.to(device)
+    with torch.no_grad():
+        image = vae.decode(latent_sampled)
+
+    if args.offload:
+        vae.to("cpu")
+
+    image = image.float()
+    image = torch.clamp((image + 1.0) / 2.0, min=0.0, max=1.0)[0]
+    decoded_np = 255.0 * np.moveaxis(image.cpu().numpy(), 0, 2)
+    decoded_np = decoded_np.astype(np.uint8)
+    out_image = Image.fromarray(decoded_np)
+
+    # save image
+    output_dir = args.output_dir
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, f"{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+    out_image.save(output_path)
+
+    logger.info(f"Saved image to {output_path}")
+
+
+def load_gated_mmdit_for_inference(
+    ckpt_path: str,
+    gate_type: str,
+    dtype: torch.dtype,
+    device: str,
+):
+    """
+    Load a trained Gated MMDiT model for inference.
+
+    Args:
+        ckpt_path: Path to the checkpoint file
+        gate_type: Type of gating used during training ("headwise" or "elementwise")
+        dtype: Model dtype
+        device: Device to load the model to
+
+    Returns:
+        GatedMMDiT model
+    """
+    logger.info(f"Loading Gated MMDiT from {ckpt_path} with gate_type={gate_type}...")
+
+    # Load state dict
+    state_dict = load_safetensors(ckpt_path, device, disable_mmap=True, dtype=dtype)
+
+    # Extract MMDiT state dict
+    mmdit_prefix = "model.diffusion_model."
+    mmdit_sd = {}
+    for k in list(state_dict.keys()):
+        if k.startswith(mmdit_prefix):
+            mmdit_sd[k[len(mmdit_prefix):]] = state_dict.pop(k)
+
+    # Check if this is already a gated model (check for gate dimensions in qkv weights)
+    is_gated_checkpoint = False
+    for key in mmdit_sd.keys():
+        if "attn.qkv.weight" in key:
+            # Check if the weight has extra gate dimensions
+            weight_shape = mmdit_sd[key].shape
+            # For SD3.5 Medium: hidden_size=2432, qkv_out=7296
+            # Gated headwise: qkv_out=7296+38=7334
+            # Gated elementwise: qkv_out=7296+2432=9728
+            expected_qkv = weight_shape[1] * 3  # dim * 3
+            if weight_shape[0] != expected_qkv:
+                is_gated_checkpoint = True
+                logger.info("Detected gated checkpoint (already has gate dimensions)")
+            break
+
+    # Detect model params
+    params = sd3_utils.detect_sd3_model_type(mmdit_sd)
+    logger.info(f"Detected model type: {params.model_type}, depth: {params.depth}")
+
+    # Create gated model
+    mmdit = sd3_models_gated.create_gated_sd3_mmdit(params, attn_mode="torch", gate_type=gate_type)
+
+    if is_gated_checkpoint:
+        # Load directly if already a gated checkpoint
+        info = mmdit.load_state_dict(mmdit_sd, strict=False)
+    else:
+        # Convert original weights to gated format
+        logger.info("Converting original weights to gated format...")
+        gated_sd = sd3_models_gated.load_gated_mmdit_from_original(mmdit_sd, gate_type=gate_type, depth=params.depth)
+        info = mmdit.load_state_dict(gated_sd, strict=False)
+
+    if info.missing_keys:
+        logger.info(f"Missing keys: {info.missing_keys}")
+    if info.unexpected_keys:
+        logger.warning(f"Unexpected keys: {info.unexpected_keys}")
+
+    mmdit.to(dtype)
+    mmdit.to(device)
+    mmdit.eval()
+
+    logger.info(f"Loaded GatedMMDiT successfully")
+    return mmdit, state_dict
+
+
+if __name__ == "__main__":
+    target_height = 1024
+    target_width = 1024
+
+    device = get_preferred_device()
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--ckpt_path", type=str, required=True, help="Path to the SD3.5 checkpoint")
+    parser.add_argument("--clip_g", type=str, required=False)
+    parser.add_argument("--clip_l", type=str, required=False)
+    parser.add_argument("--t5xxl", type=str, required=False)
+    parser.add_argument("--t5xxl_token_length", type=int, default=256, help="t5xxl token length, default: 256")
+    parser.add_argument("--apply_lg_attn_mask", action="store_true")
+    parser.add_argument("--apply_t5_attn_mask", action="store_true")
+    parser.add_argument("--prompt", type=str, default="A photo of a cat")
+    parser.add_argument("--negative_prompt", type=str, default="")
+    parser.add_argument("--cfg_scale", type=float, default=5.0)
+    parser.add_argument("--offload", action="store_true", help="Offload to CPU")
+    parser.add_argument("--output_dir", type=str, default=".")
+    parser.add_argument("--fp16", action="store_true")
+    parser.add_argument("--bf16", action="store_true")
+    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument("--steps", type=int, default=50)
+    parser.add_argument("--width", type=int, default=target_width)
+    parser.add_argument("--height", type=int, default=target_height)
+    parser.add_argument("--interactive", action="store_true")
+
+    # Gated attention arguments
+    parser.add_argument(
+        "--gate_type", type=str, default="headwise",
+        choices=["headwise", "elementwise", "none"],
+        help="Type of gating: 'headwise', 'elementwise', or 'none'. Must match training config. Default: headwise",
+    )
+    parser.add_argument(
+        "--use_original_model", action="store_true",
+        help="Use original MMDiT instead of GatedMMDiT (for comparison)",
+    )
+
+    args = parser.parse_args()
+
+    seed = args.seed
+    steps = args.steps
+
+    sd3_dtype = torch.float32
+    if args.fp16:
+        sd3_dtype = torch.float16
+    elif args.bf16:
+        sd3_dtype = torch.bfloat16
+
+    loading_device = "cpu" if args.offload else device
+
+    if args.use_original_model:
+        # Load original model for comparison
+        logger.info(f"Loading original SD3 models from {args.ckpt_path}...")
+        state_dict = load_safetensors(args.ckpt_path, loading_device, disable_mmap=True, dtype=sd3_dtype)
+
+        clip_l = sd3_utils.load_clip_l(args.clip_l, sd3_dtype, loading_device, state_dict=state_dict)
+        clip_g = sd3_utils.load_clip_g(args.clip_g, sd3_dtype, loading_device, state_dict=state_dict)
+        t5xxl = sd3_utils.load_t5xxl(args.t5xxl, sd3_dtype, loading_device, state_dict=state_dict)
+        vae = sd3_utils.load_vae(None, sd3_dtype, loading_device, state_dict=state_dict)
+        mmdit = sd3_utils.load_mmdit(state_dict, sd3_dtype, loading_device)
+    else:
+        # Load gated model
+        mmdit, state_dict = load_gated_mmdit_for_inference(
+            args.ckpt_path,
+            args.gate_type,
+            sd3_dtype,
+            loading_device,
+        )
+
+        # Load text encoders and VAE
+        clip_l = sd3_utils.load_clip_l(args.clip_l, sd3_dtype, loading_device, state_dict=state_dict)
+        clip_g = sd3_utils.load_clip_g(args.clip_g, sd3_dtype, loading_device, state_dict=state_dict)
+        t5xxl = sd3_utils.load_t5xxl(args.t5xxl, sd3_dtype, loading_device, state_dict=state_dict)
+        vae = sd3_utils.load_vae(None, sd3_dtype, loading_device, state_dict=state_dict)
+
+    clip_l.to(sd3_dtype)
+    clip_g.to(sd3_dtype)
+    t5xxl.to(sd3_dtype)
+    vae.to(sd3_dtype)
+    mmdit.to(sd3_dtype)
+
+    if not args.offload:
+        clip_l.to(device)
+        clip_g.to(device)
+        t5xxl.to(device)
+        vae.to(device)
+        mmdit.to(device)
+
+    clip_l.eval()
+    clip_g.eval()
+    t5xxl.eval()
+    mmdit.eval()
+    vae.eval()
+
+    # load tokenizers
+    logger.info("Loading tokenizers...")
+    tokenize_strategy = strategy_sd3.Sd3TokenizeStrategy(args.t5xxl_token_length)
+    encoding_strategy = strategy_sd3.Sd3TextEncodingStrategy()
+
+    if not args.interactive:
+        generate_image(
+            mmdit,
+            vae,
+            clip_l,
+            clip_g,
+            t5xxl,
+            args.steps,
+            args.prompt,
+            args.seed,
+            args.width,
+            args.height,
+            device,
+            args.negative_prompt,
+            args.cfg_scale,
+            tokenize_strategy,
+            encoding_strategy,
+            args,
+            sd3_dtype,
+        )
+    else:
+        # loop for interactive
+        width = args.width
+        height = args.height
+        steps = None
+        cfg_scale = args.cfg_scale
+
+        while True:
+            print(
+                "Enter prompt (empty to exit). Options: --w <width> --h <height> --s <steps> --d <seed>"
+                " --n <negative prompt>, `--n -` for empty negative prompt"
+                " --c <cfg_scale>. Options are kept for the next prompt. Current options:"
+                f" width={width}, height={height}, steps={steps}, seed={seed}, cfg_scale={cfg_scale}"
+            )
+            prompt = input()
+            if prompt == "":
+                break
+
+            # parse options
+            options = prompt.split("--")
+            prompt = options[0].strip()
+            current_seed = None
+            negative_prompt = None
+            for opt in options[1:]:
+                try:
+                    opt = opt.strip()
+                    if opt.startswith("w"):
+                        width = int(opt[1:].strip())
+                    elif opt.startswith("h"):
+                        height = int(opt[1:].strip())
+                    elif opt.startswith("s"):
+                        steps = int(opt[1:].strip())
+                    elif opt.startswith("d"):
+                        current_seed = int(opt[1:].strip())
+                    elif opt.startswith("n"):
+                        negative_prompt = opt[1:].strip()
+                        if negative_prompt == "-":
+                            negative_prompt = ""
+                    elif opt.startswith("c"):
+                        cfg_scale = float(opt[1:].strip())
+                except ValueError as e:
+                    logger.error(f"Invalid option: {opt}, {e}")
+
+            generate_image(
+                mmdit,
+                vae,
+                clip_l,
+                clip_g,
+                t5xxl,
+                steps if steps is not None else args.steps,
+                prompt,
+                current_seed if current_seed is not None else args.seed,
+                width,
+                height,
+                device,
+                negative_prompt if negative_prompt is not None else args.negative_prompt,
+                cfg_scale,
+                tokenize_strategy,
+                encoding_strategy,
+                args,
+                sd3_dtype,
+            )
+
+    logger.info("Done!")
