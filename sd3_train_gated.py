@@ -460,7 +460,11 @@ def train(args):
 
     # prepare with accelerator
     if train_mmdit:
-        mmdit = accelerator.prepare(mmdit, device_placement=[not is_swapping_blocks])
+        # DeepSpeed doesn't support custom device_placement
+        if accelerator.state.deepspeed_plugin is not None:
+            mmdit = accelerator.prepare(mmdit)
+        else:
+            mmdit = accelerator.prepare(mmdit, device_placement=[not is_swapping_blocks])
         if is_swapping_blocks:
             accelerator.unwrap_model(mmdit).move_to_device_except_swap_blocks(accelerator.device)
     if train_clip:
