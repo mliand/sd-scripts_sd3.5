@@ -460,19 +460,23 @@ def train(args):
 
     # prepare with accelerator
     if train_mmdit:
-        # DeepSpeed doesn't support custom device_placement
+        # DeepSpeed doesn't support custom device_placement, and requires model + optimizer together
         if accelerator.state.deepspeed_plugin is not None:
-            mmdit = accelerator.prepare(mmdit)
+            mmdit, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+                mmdit, optimizer, train_dataloader, lr_scheduler
+            )
         else:
             mmdit = accelerator.prepare(mmdit, device_placement=[not is_swapping_blocks])
+            optimizer, train_dataloader, lr_scheduler = accelerator.prepare(optimizer, train_dataloader, lr_scheduler)
         if is_swapping_blocks:
             accelerator.unwrap_model(mmdit).move_to_device_except_swap_blocks(accelerator.device)
+    else:
+        optimizer, train_dataloader, lr_scheduler = accelerator.prepare(optimizer, train_dataloader, lr_scheduler)
     if train_clip:
         clip_l = accelerator.prepare(clip_l)
         clip_g = accelerator.prepare(clip_g)
     if train_t5xxl:
         t5xxl = accelerator.prepare(t5xxl)
-    optimizer, train_dataloader, lr_scheduler = accelerator.prepare(optimizer, train_dataloader, lr_scheduler)
 
     if args.full_fp16:
         train_util.patch_accelerator_for_fp16_training(accelerator)
