@@ -798,6 +798,21 @@ class GatedMMDiT(nn.Module):
 
         pos_embed_size = round(math.sqrt(pos_embed.shape[1]))
 
+        if h > pos_embed_size or w > pos_embed_size:
+            logger.warning(
+                f"Add new pos_embed for size {h}x{w} as it exceeds the scaled pos_embed size {pos_embed_size}. Image is too tall or wide."
+            )
+            patched_size = max(h, w)
+            grid_size = int(patched_size * GatedMMDiT.POS_EMBED_MAX_RATIO)
+            pos_embed_size = grid_size
+            pos_embed = get_scaled_2d_sincos_pos_embed(self.hidden_size, grid_size, sample_size=patched_size)
+            pos_embed = torch.from_numpy(pos_embed).float().unsqueeze(0)
+            self.resolution_pos_embeds[patched_size] = pos_embed
+
+            area = pos_embed_size**2
+            self.resolution_area_to_latent_size.append((area, patched_size))
+            self.resolution_area_to_latent_size = sorted(self.resolution_area_to_latent_size)
+
         if not random_crop:
             top = (pos_embed_size - h) // 2
             left = (pos_embed_size - w) // 2
