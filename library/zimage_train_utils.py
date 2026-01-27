@@ -408,7 +408,10 @@ def sample_image_inference(
     encoding_strategy = strategy_base.TextEncodingStrategy.get_strategy()
 
     device = accelerator.device
-    dtype = transformer.dtype
+    if hasattr(transformer, "x_pad_token") and transformer.x_pad_token is not None:
+        dtype = transformer.x_pad_token.dtype
+    else:
+        dtype = transformer.dtype
 
     prompt_embeds = _encode_prompt(
         tokenize_strategy,
@@ -429,7 +432,7 @@ def sample_image_inference(
     )
     prompt_embeds_tensor, prompt_mask = _trim_pad_embeds_and_mask(image_sequence_length, prompt_embeds_tensor, prompt_mask)
     prompt_embeds = [prompt_embeds_tensor[i][prompt_mask[i]] for i in range(prompt_embeds_tensor.shape[0])]
-    cap_dtype = transformer.cap_pad_token.dtype if hasattr(transformer, "cap_pad_token") else transformer.dtype
+    cap_dtype = transformer.cap_pad_token.dtype if hasattr(transformer, "cap_pad_token") else dtype
     prompt_embeds = [embed.to(dtype=cap_dtype) for embed in prompt_embeds]
 
     do_cfg = guidance_scale is not None and guidance_scale > 1.0
@@ -461,7 +464,7 @@ def sample_image_inference(
     latents = torch.randn(
         (1, channels, height // 8, width // 8),
         device=device,
-        dtype=torch.float32,
+        dtype=dtype,
         generator=torch.Generator(device=device).manual_seed(seed) if seed is not None else None,
     )
 
