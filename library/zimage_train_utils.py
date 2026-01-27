@@ -96,34 +96,39 @@ def add_zimage_train_arguments(parser: argparse.ArgumentParser):
             required=True,
             help="path to Z-Image VAE (diffusers directory or safetensors file)",
         )
-    parser.add_argument(
-        "--text_encoder",
-        type=str,
-        required=True,
-        help="path or HF id for the Qwen text encoder",
-    )
-    parser.add_argument(
-        "--tokenizer",
-        type=str,
-        default=None,
-        help="tokenizer path or HF id (defaults to --text_encoder)",
-    )
-    parser.add_argument(
-        "--max_token_length",
-        type=int,
-        default=512,
-        help="maximum token length for Qwen tokenizer",
-    )
-    parser.add_argument(
-        "--train_text_encoder",
-        action="store_true",
-        help="enable training of the Qwen text encoder",
-    )
-    parser.add_argument(
-        "--disable_chat_template",
-        action="store_true",
-        help="do not apply tokenizer chat template for prompts",
-    )
+    if "--text_encoder" not in parser._option_string_actions:
+        parser.add_argument(
+            "--text_encoder",
+            type=str,
+            required=True,
+            help="path or HF id for the Qwen text encoder",
+        )
+    if "--tokenizer" not in parser._option_string_actions:
+        parser.add_argument(
+            "--tokenizer",
+            type=str,
+            default=None,
+            help="tokenizer path or HF id (defaults to --text_encoder)",
+        )
+    if "--max_token_length" not in parser._option_string_actions:
+        parser.add_argument(
+            "--max_token_length",
+            type=int,
+            default=512,
+            help="maximum token length for Qwen tokenizer",
+        )
+    if "--train_text_encoder" not in parser._option_string_actions:
+        parser.add_argument(
+            "--train_text_encoder",
+            action="store_true",
+            help="enable training of the Qwen text encoder",
+        )
+    if "--disable_chat_template" not in parser._option_string_actions:
+        parser.add_argument(
+            "--disable_chat_template",
+            action="store_true",
+            help="do not apply tokenizer chat template for prompts",
+        )
     parser.add_argument(
         "--timestep_sampling",
         type=str,
