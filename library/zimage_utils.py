@@ -2,7 +2,8 @@ import os
 from typing import Optional, Tuple, Union
 
 import torch
-from diffusers import AutoencoderKL, ZImageTransformer2DModel
+from library.zimage_autoencoder import AutoencoderKL, load_autoencoder_kl
+from library.zimage_model import load_zimage_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from library.utils import setup_logging
@@ -51,11 +52,7 @@ def load_transformer(
     device: Union[str, torch.device],
 ):
     logger.info(f"Loading Z-Image transformer from {path}")
-    if os.path.isdir(path):
-        transformer = ZImageTransformer2DModel.from_pretrained(path, subfolder="transformer", torch_dtype=dtype)
-    else:
-        transformer = ZImageTransformer2DModel.from_single_file(path, torch_dtype=dtype)
-    transformer.to(device)
+    transformer = load_zimage_model(path, dtype=dtype, device=device)
     return transformer
 
 
@@ -66,10 +63,20 @@ def load_vae(
 ):
     logger.info(f"Loading Z-Image VAE from {path}")
     if os.path.isdir(path):
-        vae = AutoencoderKL.from_pretrained(path, subfolder="vae", torch_dtype=dtype)
-    else:
-        vae = AutoencoderKL.from_single_file(path, torch_dtype=dtype)
+        found = False
+        for candidate in (os.path.join(path, "vae"), path):
+            if not os.path.isdir(candidate):
+                continue
+            files = [f for f in os.listdir(candidate) if f.endswith(".safetensors")]
+            if files:
+                path = os.path.join(candidate, sorted(files)[0])
+                found = True
+                break
+        if not found:
+            raise FileNotFoundError(f"No .safetensors found under {path}")
+    vae = load_autoencoder_kl(path, device="cpu")
     vae.to(device)
+    vae.to(torch.float32)
     vae.eval()
     return vae
 

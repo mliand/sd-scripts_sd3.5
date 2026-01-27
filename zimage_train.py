@@ -320,7 +320,7 @@ def train(args: argparse.Namespace):
                     latents = batch["latents"].to(accelerator.device, dtype=weight_dtype)
                 else:
                     with torch.no_grad():
-                        latents = vae.encode(batch["images"].to(vae.dtype)).latent_dist.mode()
+                        latents = vae.encode(batch["images"].to(vae.dtype)).mode()
                         latents = latents.to(accelerator.device, dtype=weight_dtype)
 
                 latents = zimage_utils.scale_shift_latents(latents, vae)
@@ -346,7 +346,8 @@ def train(args: argparse.Namespace):
                 )
 
                 cap_dtype = zimage_train_utils._get_model_param_dtype(transformer, transformer.dtype)
-                cap_feats = [prompt_embeds[i][prompt_mask[i]].to(dtype=cap_dtype) for i in range(prompt_embeds.shape[0])]
+                prompt_embeds = prompt_embeds.to(dtype=cap_dtype)
+                cap_mask = prompt_mask
 
                 noise = torch.randn_like(latents)
                 noisy_model_input, timesteps, sigmas = get_noisy_model_input_and_timesteps(
@@ -359,11 +360,11 @@ def train(args: argparse.Namespace):
                 noisy_model_input = noisy_model_input.unsqueeze(2)
 
                 with accelerator.autocast():
-                    zimage_train_utils._sync_pad_token_dtype(transformer, noisy_model_input.dtype)
                     model_pred = transformer(
                         x=noisy_model_input,
                         t=t_input,
-                        cap_feats=cap_feats,
+                        cap_feats=prompt_embeds,
+                        cap_mask=cap_mask,
                     )
 
                 model_pred = model_pred.squeeze(2)

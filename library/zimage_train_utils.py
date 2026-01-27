@@ -256,11 +256,7 @@ def _encode_prompt(tokenize_strategy, encoding_strategy, text_encoder, prompt: s
         prompt_embeds = prompt_embeds.to(device=device, dtype=dtype)
         prompt_mask = prompt_mask.to(device=device).bool()
 
-    # Convert to list of per-sample embeddings with padding removed.
-    prompt_mask = prompt_mask.bool()
-    prompt_embeds_list = [prompt_embeds[i][prompt_mask[i]] for i in range(prompt_embeds.shape[0])]
-
-    return prompt_embeds_list
+    return prompt_embeds, prompt_mask
 
 
 def sample_images(
@@ -417,7 +413,7 @@ def sample_image_inference(
     device = accelerator.device
     dtype = _get_model_param_dtype(transformer, transformer.dtype)
 
-    prompt_embeds = _encode_prompt(
+    prompt_embeds, prompt_mask = _encode_prompt(
         tokenize_strategy,
         encoding_strategy,
         text_encoder,
@@ -428,20 +424,13 @@ def sample_image_inference(
     )
     patch_size = transformer.all_patch_size[0] if hasattr(transformer, "all_patch_size") else 2
     image_sequence_length = (height // 8 // patch_size) * (width // 8 // patch_size)
-    prompt_embeds_tensor = torch.stack(prompt_embeds, dim=0)
-    prompt_mask = torch.ones(
-        (prompt_embeds_tensor.shape[0], prompt_embeds_tensor.shape[1]),
-        dtype=torch.bool,
-        device=prompt_embeds_tensor.device,
-    )
-    prompt_embeds_tensor, prompt_mask = _trim_pad_embeds_and_mask(image_sequence_length, prompt_embeds_tensor, prompt_mask)
-    prompt_embeds = [prompt_embeds_tensor[i][prompt_mask[i]] for i in range(prompt_embeds_tensor.shape[0])]
+    prompt_embeds, prompt_mask = _trim_pad_embeds_and_mask(image_sequence_length, prompt_embeds, prompt_mask)
     cap_dtype = _get_model_param_dtype(transformer, dtype)
-    prompt_embeds = [embed.to(dtype=cap_dtype) for embed in prompt_embeds]
+    prompt_embeds = prompt_embeds.to(dtype=cap_dtype)
 
     do_cfg = guidance_scale is not None and guidance_scale > 1.0
     if do_cfg:
-        negative_embeds = _encode_prompt(
+        negative_embeds, negative_mask = _encode_prompt(
             tokenize_strategy,
             encoding_strategy,
             text_encoder,
@@ -450,17 +439,10 @@ def sample_image_inference(
             device,
             dtype,
         )
-        negative_embeds_tensor = torch.stack(negative_embeds, dim=0)
-        negative_mask = torch.ones(
-            (negative_embeds_tensor.shape[0], negative_embeds_tensor.shape[1]),
-            dtype=torch.bool,
-            device=negative_embeds_tensor.device,
+        negative_embeds, negative_mask = _trim_pad_embeds_and_mask(
+            image_sequence_length, negative_embeds, negative_mask
         )
-        negative_embeds_tensor, negative_mask = _trim_pad_embeds_and_mask(
-            image_sequence_length, negative_embeds_tensor, negative_mask
-        )
-        negative_embeds = [negative_embeds_tensor[i][negative_mask[i]] for i in range(negative_embeds_tensor.shape[0])]
-        negative_embeds = [embed.to(dtype=cap_dtype) for embed in negative_embeds]
+        negative_embeds = negative_embeds.to(dtype=cap_dtype)
     else:
         negative_embeds = None
 
@@ -481,12 +463,20 @@ def sample_image_inference(
         timestep = (1000 - timestep) / 1000
 
         latent_model_input = latents.to(dtype).unsqueeze(2)
-        _sync_pad_token_dtype(transformer, latent_model_input.dtype)
-        model_out = transformer(x=latent_model_input, t=timestep, cap_feats=prompt_embeds)
+        model_out = transformer(
+            x=latent_model_input,
+            t=timestep,
+            cap_feats=prompt_embeds,
+            cap_mask=prompt_mask,
+        )
 
         if do_cfg:
-            _sync_pad_token_dtype(transformer, latent_model_input.dtype)
-            neg_out = transformer(x=latent_model_input, t=timestep, cap_feats=negative_embeds)
+            neg_out = transformer(
+                x=latent_model_input,
+                t=timestep,
+                cap_feats=negative_embeds,
+                cap_mask=negative_mask,
+            )
             noise_pred = neg_out + guidance_scale * (model_out - neg_out)
         else:
             noise_pred = model_out

@@ -188,7 +188,7 @@ class ZImageLatentsCachingStrategy(LatentsCachingStrategy):
 
     def cache_batch_latents(self, model: Any, batch: List, flip_aug: bool, alpha_mask: bool, random_crop: bool):
         def encode_by_vae(img_tensor: torch.Tensor) -> torch.Tensor:
-            latents = model.encode(img_tensor).latent_dist.mode()
+            latents = model.encode(img_tensor).mode()
             return latents
 
         self._default_cache_batch_latents(
