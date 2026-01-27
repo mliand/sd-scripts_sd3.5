@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import time
 from typing import Optional
@@ -197,6 +198,37 @@ def _latents_to_pil(latents: torch.Tensor) -> Image.Image:
     return Image.fromarray(image)
 
 
+SEQ_MULTI_OF = 32
+
+
+def _trim_pad_embeds_and_mask(image_length: int, prompt_embeds: torch.Tensor, prompt_masks: torch.Tensor):
+    if prompt_embeds.shape[0] == 1:
+        actual_text_length = int(prompt_masks.sum(dim=1).item())
+        prompt_embeds = prompt_embeds[:, :actual_text_length, :]
+        prompt_masks = prompt_masks[:, :actual_text_length]
+        return prompt_embeds, prompt_masks
+
+    max_text_length = prompt_masks.sum(dim=1).max().item()
+    total_length = image_length + max_text_length
+    padded_total_length = math.ceil(total_length / SEQ_MULTI_OF) * SEQ_MULTI_OF
+    pad_length = padded_total_length - total_length
+    max_text_length += pad_length
+    if max_text_length > prompt_embeds.shape[1]:
+        pad_size = max_text_length - prompt_embeds.shape[1]
+        pad_embeds = torch.zeros(
+            (prompt_embeds.shape[0], pad_size, prompt_embeds.shape[2]),
+            dtype=prompt_embeds.dtype,
+            device=prompt_embeds.device,
+        )
+        prompt_embeds = torch.cat([prompt_embeds, pad_embeds], dim=1)
+        pad_masks = torch.zeros((prompt_masks.shape[0], pad_size), dtype=prompt_masks.dtype, device=prompt_masks.device)
+        prompt_masks = torch.cat([prompt_masks, pad_masks], dim=1)
+    else:
+        prompt_embeds = prompt_embeds[:, :max_text_length, :]
+        prompt_masks = prompt_masks[:, :max_text_length]
+    return prompt_embeds, prompt_masks
+
+
 def _encode_prompt(tokenize_strategy, encoding_strategy, text_encoder, prompt: str, cached_outputs, device, dtype):
     if cached_outputs is not None and prompt in cached_outputs:
         prompt_embeds, prompt_mask = cached_outputs[prompt]
@@ -207,11 +239,6 @@ def _encode_prompt(tokenize_strategy, encoding_strategy, text_encoder, prompt: s
         prompt_embeds, prompt_mask = encoding_strategy.encode_tokens(tokenize_strategy, [text_encoder], tokens_and_masks)
         prompt_embeds = prompt_embeds.to(device=device, dtype=dtype)
         prompt_mask = prompt_mask.to(device=device).bool()
-
-    if prompt_embeds.shape[0] == 1:
-        actual_length = int(prompt_mask.sum(dim=1).item())
-        prompt_embeds = prompt_embeds[:, :actual_length, :]
-        prompt_mask = prompt_mask[:, :actual_length]
 
     # Convert to list of per-sample embeddings with padding removed.
     prompt_mask = prompt_mask.bool()
@@ -383,6 +410,18 @@ def sample_image_inference(
         device,
         dtype,
     )
+    patch_size = transformer.all_patch_size[0] if hasattr(transformer, "all_patch_size") else 2
+    image_sequence_length = (height // 8 // patch_size) * (width // 8 // patch_size)
+    prompt_embeds_tensor = torch.stack(prompt_embeds, dim=0)
+    prompt_mask = torch.ones(
+        (prompt_embeds_tensor.shape[0], prompt_embeds_tensor.shape[1]),
+        dtype=torch.bool,
+        device=prompt_embeds_tensor.device,
+    )
+    prompt_embeds_tensor, prompt_mask = _trim_pad_embeds_and_mask(image_sequence_length, prompt_embeds_tensor, prompt_mask)
+    prompt_embeds = [prompt_embeds_tensor[i][prompt_mask[i]] for i in range(prompt_embeds_tensor.shape[0])]
+    cap_dtype = transformer.cap_pad_token.dtype if hasattr(transformer, "cap_pad_token") else transformer.dtype
+    prompt_embeds = [embed.to(dtype=cap_dtype) for embed in prompt_embeds]
 
     do_cfg = guidance_scale is not None and guidance_scale > 1.0
     if do_cfg:
@@ -395,6 +434,17 @@ def sample_image_inference(
             device,
             dtype,
         )
+        negative_embeds_tensor = torch.stack(negative_embeds, dim=0)
+        negative_mask = torch.ones(
+            (negative_embeds_tensor.shape[0], negative_embeds_tensor.shape[1]),
+            dtype=torch.bool,
+            device=negative_embeds_tensor.device,
+        )
+        negative_embeds_tensor, negative_mask = _trim_pad_embeds_and_mask(
+            image_sequence_length, negative_embeds_tensor, negative_mask
+        )
+        negative_embeds = [negative_embeds_tensor[i][negative_mask[i]] for i in range(negative_embeds_tensor.shape[0])]
+        negative_embeds = [embed.to(dtype=cap_dtype) for embed in negative_embeds]
     else:
         negative_embeds = None
 

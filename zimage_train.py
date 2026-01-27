@@ -339,7 +339,16 @@ def train(args: argparse.Namespace):
                     prompt_embeds = prompt_embeds.to(accelerator.device, dtype=weight_dtype)
                     prompt_mask = prompt_mask.to(accelerator.device).bool()
 
-                cap_feats = [prompt_embeds[i][prompt_mask[i]] for i in range(prompt_embeds.shape[0])]
+                patch_size = transformer.all_patch_size[0] if hasattr(transformer, "all_patch_size") else 2
+                image_sequence_length = (latents.shape[2] // patch_size) * (latents.shape[3] // patch_size)
+                prompt_embeds, prompt_mask = zimage_train_utils._trim_pad_embeds_and_mask(
+                    image_sequence_length, prompt_embeds, prompt_mask
+                )
+
+                cap_dtype = (
+                    transformer.cap_pad_token.dtype if hasattr(transformer, "cap_pad_token") else transformer.dtype
+                )
+                cap_feats = [prompt_embeds[i][prompt_mask[i]].to(dtype=cap_dtype) for i in range(prompt_embeds.shape[0])]
 
                 noise = torch.randn_like(latents)
                 noisy_model_input, timesteps, sigmas = get_noisy_model_input_and_timesteps(
