@@ -213,7 +213,11 @@ def _encode_prompt(tokenize_strategy, encoding_strategy, text_encoder, prompt: s
         prompt_embeds = prompt_embeds[:, :actual_length, :]
         prompt_mask = prompt_mask[:, :actual_length]
 
-    return prompt_embeds, prompt_mask
+    # Convert to list of per-sample embeddings with padding removed.
+    prompt_mask = prompt_mask.bool()
+    prompt_embeds_list = [prompt_embeds[i][prompt_mask[i]] for i in range(prompt_embeds.shape[0])]
+
+    return prompt_embeds_list
 
 
 def sample_images(
@@ -370,7 +374,7 @@ def sample_image_inference(
     device = accelerator.device
     dtype = transformer.dtype
 
-    prompt_embeds, prompt_mask = _encode_prompt(
+    prompt_embeds = _encode_prompt(
         tokenize_strategy,
         encoding_strategy,
         text_encoder,
@@ -382,7 +386,7 @@ def sample_image_inference(
 
     do_cfg = guidance_scale is not None and guidance_scale > 1.0
     if do_cfg:
-        negative_embeds, negative_mask = _encode_prompt(
+        negative_embeds = _encode_prompt(
             tokenize_strategy,
             encoding_strategy,
             text_encoder,
@@ -393,7 +397,6 @@ def sample_image_inference(
         )
     else:
         negative_embeds = None
-        negative_mask = None
 
     channels = getattr(transformer, "in_channels", 16)
     latents = torch.randn(
@@ -412,10 +415,10 @@ def sample_image_inference(
         timestep = (1000 - timestep) / 1000
 
         latent_model_input = latents.to(dtype).unsqueeze(2)
-        model_out = transformer(x=latent_model_input, t=timestep, cap_feats=prompt_embeds, cap_mask=prompt_mask)
+        model_out = transformer(x=latent_model_input, t=timestep, cap_feats=prompt_embeds)
 
         if do_cfg:
-            neg_out = transformer(x=latent_model_input, t=timestep, cap_feats=negative_embeds, cap_mask=negative_mask)
+            neg_out = transformer(x=latent_model_input, t=timestep, cap_feats=negative_embeds)
             noise_pred = neg_out + guidance_scale * (model_out - neg_out)
         else:
             noise_pred = model_out

@@ -339,6 +339,8 @@ def train(args: argparse.Namespace):
                     prompt_embeds = prompt_embeds.to(accelerator.device, dtype=weight_dtype)
                     prompt_mask = prompt_mask.to(accelerator.device).bool()
 
+                cap_feats = [prompt_embeds[i][prompt_mask[i]] for i in range(prompt_embeds.shape[0])]
+
                 noise = torch.randn_like(latents)
                 noisy_model_input, timesteps, sigmas = get_noisy_model_input_and_timesteps(
                     args, latents, noise, accelerator.device, weight_dtype
@@ -353,8 +355,7 @@ def train(args: argparse.Namespace):
                     model_pred = transformer(
                         x=noisy_model_input,
                         t=t_input,
-                        cap_feats=prompt_embeds,
-                        cap_mask=prompt_mask,
+                        cap_feats=cap_feats,
                     )
 
                 model_pred = model_pred.squeeze(2)
