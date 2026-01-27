@@ -166,7 +166,18 @@ def prepare_deepspeed_model(args: argparse.Namespace, **models):
                     )                    
                     device_type = get_preferred_device().type
 
-                with torch.autocast(device_type = device_type):
+                if args.mixed_precision == "bf16":
+                    autocast_dtype = torch.bfloat16
+                elif args.mixed_precision == "fp16":
+                    autocast_dtype = torch.float16
+                else:
+                    autocast_dtype = None
+
+                if autocast_dtype is None:
+                    with torch.autocast(device_type=device_type):
+                        return forward_fn(*args, **kwargs)
+
+                with torch.autocast(device_type=device_type, dtype=autocast_dtype):
                     return forward_fn(*args, **kwargs)
 
             model.forward = forward
