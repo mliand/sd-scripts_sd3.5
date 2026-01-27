@@ -182,6 +182,7 @@ def train(args: argparse.Namespace):
     text_encoder.requires_grad_(args.train_text_encoder)
     text_encoder.eval()
 
+    sample_prompts_te_outputs = None
     if args.cache_text_encoder_outputs:
         text_encoder.to(accelerator.device, dtype=weight_dtype)
         text_encoder_caching_strategy = strategy_zimage.ZImageTextEncoderOutputsCachingStrategy(
@@ -195,6 +196,22 @@ def train(args: argparse.Namespace):
 
         with accelerator.autocast():
             train_dataset_group.new_cache_text_encoder_outputs([text_encoder], accelerator)
+
+        if args.sample_prompts is not None:
+            logger.info(f"cache Text Encoder outputs for sample prompt: {args.sample_prompts}")
+            prompts = train_util.load_prompts(args.sample_prompts)
+            sample_prompts_te_outputs = {}
+            with accelerator.autocast(), torch.no_grad():
+                for prompt_dict in prompts:
+                    for p in [prompt_dict.get("prompt", ""), prompt_dict.get("negative_prompt", "")]:
+                        if p in sample_prompts_te_outputs:
+                            continue
+                        logger.info(f"cache Text Encoder outputs for prompt: {p}")
+                        tokens_and_masks = zimage_tokenize_strategy.tokenize(p)
+                        prompt_embeds, prompt_mask = text_encoding_strategy.encode_tokens(
+                            zimage_tokenize_strategy, [text_encoder], tokens_and_masks
+                        )
+                        sample_prompts_te_outputs[p] = (prompt_embeds.cpu(), prompt_mask.cpu())
 
         text_encoder.to("cpu")
         clean_memory_on_device(accelerator.device)
@@ -274,7 +291,14 @@ def train(args: argparse.Namespace):
     global_step = 0
     epoch = 0
 
+    optimizer_eval_fn()
+    sample_text_encoder = None if sample_prompts_te_outputs is not None and args.cache_text_encoder_outputs else text_encoder
+    zimage_train_utils.sample_images(
+        accelerator, args, 0, global_step, transformer, vae, sample_text_encoder, sample_prompts_te_outputs
+    )
     optimizer_train_fn()
+    if len(accelerator.trackers) > 0:
+        accelerator.log({}, step=0)
 
     for epoch in range(num_train_epochs):
         accelerator.print(f"\nepoch {epoch + 1}/{num_train_epochs}")
@@ -358,6 +382,11 @@ def train(args: argparse.Namespace):
                 progress_bar.update(1)
                 global_step += 1
 
+                optimizer_eval_fn()
+                zimage_train_utils.sample_images(
+                    accelerator, args, None, global_step, transformer, vae, sample_text_encoder, sample_prompts_te_outputs
+                )
+
                 if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
                     accelerator.wait_for_everyone()
                     if accelerator.is_main_process:
@@ -372,6 +401,7 @@ def train(args: argparse.Namespace):
                             accelerator.unwrap_model(transformer),
                             accelerator.unwrap_model(text_encoder) if args.train_text_encoder else None,
                         )
+                optimizer_train_fn()
 
             if global_step >= args.max_train_steps:
                 break
@@ -389,6 +419,12 @@ def train(args: argparse.Namespace):
                 accelerator.unwrap_model(transformer),
                 accelerator.unwrap_model(text_encoder) if args.train_text_encoder else None,
             )
+
+        optimizer_eval_fn()
+        zimage_train_utils.sample_images(
+            accelerator, args, epoch + 1, global_step, transformer, vae, sample_text_encoder, sample_prompts_te_outputs
+        )
+        optimizer_train_fn()
 
         if global_step >= args.max_train_steps:
             break
