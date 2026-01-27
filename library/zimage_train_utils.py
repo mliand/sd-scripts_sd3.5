@@ -208,7 +208,7 @@ def _get_model_param_dtype(transformer, fallback):
 
 
 def _sync_pad_token_dtype(transformer, dtype=None):
-    target_dtype = _get_model_param_dtype(transformer, dtype or transformer.dtype)
+    target_dtype = dtype if dtype is not None else _get_model_param_dtype(transformer, transformer.dtype)
     with torch.no_grad():
         for name in ("x_pad_token", "cap_pad_token", "siglip_pad_token"):
             if hasattr(transformer, name):
@@ -476,19 +476,19 @@ def sample_image_inference(
     timesteps = timesteps.to(device)
     sigmas = sigmas.to(device)
 
-    for i, t in enumerate(timesteps):
-        timestep = t.expand(latents.shape[0])
-        timestep = (1000 - timestep) / 1000
+        for i, t in enumerate(timesteps):
+            timestep = t.expand(latents.shape[0])
+            timestep = (1000 - timestep) / 1000
 
-        latent_model_input = latents.to(dtype).unsqueeze(2)
-        _sync_pad_token_dtype(transformer)
-        model_out = transformer(x=latent_model_input, t=timestep, cap_feats=prompt_embeds)
+            latent_model_input = latents.to(dtype).unsqueeze(2)
+            _sync_pad_token_dtype(transformer, latent_model_input.dtype)
+            model_out = transformer(x=latent_model_input, t=timestep, cap_feats=prompt_embeds)
 
-        if do_cfg:
-            _sync_pad_token_dtype(transformer)
-            neg_out = transformer(x=latent_model_input, t=timestep, cap_feats=negative_embeds)
-            noise_pred = neg_out + guidance_scale * (model_out - neg_out)
-        else:
+            if do_cfg:
+                _sync_pad_token_dtype(transformer, latent_model_input.dtype)
+                neg_out = transformer(x=latent_model_input, t=timestep, cap_feats=negative_embeds)
+                noise_pred = neg_out + guidance_scale * (model_out - neg_out)
+            else:
             noise_pred = model_out
 
         noise_pred = -noise_pred.squeeze(2)
