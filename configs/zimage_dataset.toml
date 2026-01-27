@@ -1,0 +1,16 @@
+[general]
+shuffle_caption = false
+caption_extension = ".txt"
+
+[[datasets]]
+batch_size = 1
+resolution = [1024, 1024]
+enable_bucket = true
+min_bucket_reso = 256
+max_bucket_reso = 2048
+bucket_reso_steps = 64
+bucket_no_upscale = false
+
+  [[datasets.subsets]]
+  image_dir = "/data/dataset/coco/sd3_8b/train_data/pixabay"
+  num_repeats = 1
