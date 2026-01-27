@@ -23,7 +23,7 @@ optimizer_type = "AdamW"
 deepspeed = true
 zero_stage = 1
 
-sample_prompts = "/home/coco/workspace/sd-scripts_sd3.5/sample_prompts.txt"
+sample_prompts = "./sample_prompts.txt"
 sample_every_n_steps = 500
 sample_at_first = true
 

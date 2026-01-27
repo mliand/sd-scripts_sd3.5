@@ -1,0 +1,8 @@
+# prompt, negative_prompt, seed, steps, guidance_scale, width, height
+prompt: a woman wear a dress,emotion,shot,8k
+negative_prompt:
+seed: 12345
+steps: 30
+scale: 5.0
+width: 1024
+height: 1024
