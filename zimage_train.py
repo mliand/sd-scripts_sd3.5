@@ -51,6 +51,10 @@ def train(args: argparse.Namespace):
 
     if args.pretrained_model_name_or_path is None:
         raise ValueError("--pretrained_model_name_or_path is required for Z-Image training.")
+    if args.vae is None:
+        raise ValueError("--vae is required for Z-Image training.")
+    if args.text_encoder is None:
+        raise ValueError("--text_encoder is required for Z-Image training.")
     cache_latents = args.cache_latents
 
     if args.cache_text_encoder_outputs_to_disk and not args.cache_text_encoder_outputs:

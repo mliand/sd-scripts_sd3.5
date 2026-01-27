@@ -93,14 +93,14 @@ def add_zimage_train_arguments(parser: argparse.ArgumentParser):
         parser.add_argument(
             "--vae",
             type=str,
-            required=True,
+            required=False,
             help="path to Z-Image VAE (diffusers directory or safetensors file)",
         )
     if "--text_encoder" not in parser._option_string_actions:
         parser.add_argument(
             "--text_encoder",
             type=str,
-            required=True,
+            required=False,
             help="path or HF id for the Qwen text encoder",
         )
     if "--tokenizer" not in parser._option_string_actions:
