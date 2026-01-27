@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import List
 from tqdm import tqdm
 import library.train_util as train_util
-import os
 from library.utils import setup_logging
 
 setup_logging()
@@ -34,12 +33,15 @@ def main(args):
         metadata = {}
 
     logger.info("merge caption texts to metadata json.")
+    skipped = 0
     for image_path in tqdm(image_paths):
         caption_path = image_path.with_suffix(args.caption_extension)
+        if not caption_path.exists():
+            skipped += 1
+            if args.debug:
+                logger.warning(f"caption not found, skip: {caption_path}")
+            continue
         caption = caption_path.read_text(encoding="utf-8").strip()
-
-        if not os.path.exists(caption_path):
-            caption_path = os.path.join(image_path, args.caption_extension)
 
         image_key = str(image_path) if args.full_path else image_path.stem
         if image_key not in metadata:
@@ -50,6 +52,8 @@ def main(args):
             logger.info(f"{image_key} {caption}")
 
     # metadataを書き出して終わり
+    if skipped:
+        logger.warning(f"skipped {skipped} images without captions")
     logger.info(f"writing metadata: {args.out_json}")
     Path(args.out_json).write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     logger.info("done!")
