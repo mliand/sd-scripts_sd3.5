@@ -201,6 +201,15 @@ def _latents_to_pil(latents: torch.Tensor) -> Image.Image:
 SEQ_MULTI_OF = 32
 
 
+def _sync_pad_token_dtype(transformer, dtype):
+    with torch.no_grad():
+        for name in ("x_pad_token", "cap_pad_token", "siglip_pad_token"):
+            if hasattr(transformer, name):
+                token = getattr(transformer, name)
+                if token is not None and token.dtype != dtype:
+                    token.data = token.data.to(dtype)
+
+
 def _trim_pad_embeds_and_mask(image_length: int, prompt_embeds: torch.Tensor, prompt_masks: torch.Tensor):
     if prompt_embeds.shape[0] == 1:
         actual_text_length = int(prompt_masks.sum(dim=1).item())
@@ -465,9 +474,11 @@ def sample_image_inference(
         timestep = (1000 - timestep) / 1000
 
         latent_model_input = latents.to(dtype).unsqueeze(2)
+        _sync_pad_token_dtype(transformer, latent_model_input.dtype)
         model_out = transformer(x=latent_model_input, t=timestep, cap_feats=prompt_embeds)
 
         if do_cfg:
+            _sync_pad_token_dtype(transformer, latent_model_input.dtype)
             neg_out = transformer(x=latent_model_input, t=timestep, cap_feats=negative_embeds)
             noise_pred = neg_out + guidance_scale * (model_out - neg_out)
         else:

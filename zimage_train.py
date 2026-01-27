@@ -361,6 +361,7 @@ def train(args: argparse.Namespace):
                 noisy_model_input = noisy_model_input.unsqueeze(2)
 
                 with accelerator.autocast():
+                    zimage_train_utils._sync_pad_token_dtype(transformer, noisy_model_input.dtype)
                     model_pred = transformer(
                         x=noisy_model_input,
                         t=t_input,
