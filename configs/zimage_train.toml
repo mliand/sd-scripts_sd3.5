@@ -2,7 +2,7 @@
 pretrained_model_name_or_path = "/data/Z-Image/transformer/diffusion_pytorch_model-00001-of-00003.safetensors"
 vae = "/data/Z-Image/vae/diffusion_pytorch_model.safetensors"
 text_encoder = "/data/Z-Image/text_encoder"
-tokenizer = "/data/Z-Image/text_encoder"
+tokenizer = "/data/Z-Image/tokenizer"
 dataset_config = "./configs/zimage_dataset.toml"
 output_dir = "/data/cc/zimage"
 output_name = "zimage_full"
@@ -10,6 +10,7 @@ logging_dir = "/data/cc/zimage/logs"
 log_with = "tensorboard"
 
 mixed_precision = "bf16"
+full_bf16 = false
 train_batch_size = 10
 gradient_accumulation_steps = 1
 learning_rate = 1e-4
