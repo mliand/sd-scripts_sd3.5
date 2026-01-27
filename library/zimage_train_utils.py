@@ -201,13 +201,20 @@ def _latents_to_pil(latents: torch.Tensor) -> Image.Image:
 SEQ_MULTI_OF = 32
 
 
-def _sync_pad_token_dtype(transformer, dtype):
+def _get_model_param_dtype(transformer, fallback):
+    for param in transformer.parameters():
+        return param.dtype
+    return fallback
+
+
+def _sync_pad_token_dtype(transformer, dtype=None):
+    target_dtype = _get_model_param_dtype(transformer, dtype or transformer.dtype)
     with torch.no_grad():
         for name in ("x_pad_token", "cap_pad_token", "siglip_pad_token"):
             if hasattr(transformer, name):
                 token = getattr(transformer, name)
-                if token is not None and token.dtype != dtype:
-                    token.data = token.data.to(dtype)
+                if token is not None and token.dtype != target_dtype:
+                    token.data = token.data.to(target_dtype)
 
 
 def _trim_pad_embeds_and_mask(image_length: int, prompt_embeds: torch.Tensor, prompt_masks: torch.Tensor):
@@ -408,10 +415,7 @@ def sample_image_inference(
     encoding_strategy = strategy_base.TextEncodingStrategy.get_strategy()
 
     device = accelerator.device
-    if hasattr(transformer, "x_pad_token") and transformer.x_pad_token is not None:
-        dtype = transformer.x_pad_token.dtype
-    else:
-        dtype = transformer.dtype
+    dtype = _get_model_param_dtype(transformer, transformer.dtype)
 
     prompt_embeds = _encode_prompt(
         tokenize_strategy,
@@ -432,7 +436,7 @@ def sample_image_inference(
     )
     prompt_embeds_tensor, prompt_mask = _trim_pad_embeds_and_mask(image_sequence_length, prompt_embeds_tensor, prompt_mask)
     prompt_embeds = [prompt_embeds_tensor[i][prompt_mask[i]] for i in range(prompt_embeds_tensor.shape[0])]
-    cap_dtype = transformer.cap_pad_token.dtype if hasattr(transformer, "cap_pad_token") else dtype
+    cap_dtype = _get_model_param_dtype(transformer, dtype)
     prompt_embeds = [embed.to(dtype=cap_dtype) for embed in prompt_embeds]
 
     do_cfg = guidance_scale is not None and guidance_scale > 1.0
@@ -477,11 +481,11 @@ def sample_image_inference(
         timestep = (1000 - timestep) / 1000
 
         latent_model_input = latents.to(dtype).unsqueeze(2)
-        _sync_pad_token_dtype(transformer, latent_model_input.dtype)
+        _sync_pad_token_dtype(transformer)
         model_out = transformer(x=latent_model_input, t=timestep, cap_feats=prompt_embeds)
 
         if do_cfg:
-            _sync_pad_token_dtype(transformer, latent_model_input.dtype)
+            _sync_pad_token_dtype(transformer)
             neg_out = transformer(x=latent_model_input, t=timestep, cap_feats=negative_embeds)
             noise_pred = neg_out + guidance_scale * (model_out - neg_out)
         else:

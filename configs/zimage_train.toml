@@ -23,9 +23,7 @@ optimizer_type = "AdamW"
 deepspeed = true
 zero_stage = 1
 
-sample_prompts = "./sample_prompts.txt"
-sample_every_n_steps = 500
-sample_at_first = true
+sample_at_first = false
 
 cache_latents = true
 cache_latents_to_disk = true

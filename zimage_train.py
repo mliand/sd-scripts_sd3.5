@@ -345,9 +345,7 @@ def train(args: argparse.Namespace):
                     image_sequence_length, prompt_embeds, prompt_mask
                 )
 
-                cap_dtype = (
-                    transformer.cap_pad_token.dtype if hasattr(transformer, "cap_pad_token") else transformer.dtype
-                )
+                cap_dtype = zimage_train_utils._get_model_param_dtype(transformer, transformer.dtype)
                 cap_feats = [prompt_embeds[i][prompt_mask[i]].to(dtype=cap_dtype) for i in range(prompt_embeds.shape[0])]
 
                 noise = torch.randn_like(latents)
@@ -361,7 +359,7 @@ def train(args: argparse.Namespace):
                 noisy_model_input = noisy_model_input.unsqueeze(2)
 
                 with accelerator.autocast():
-                    zimage_train_utils._sync_pad_token_dtype(transformer, noisy_model_input.dtype)
+                    zimage_train_utils._sync_pad_token_dtype(transformer)
                     model_pred = transformer(
                         x=noisy_model_input,
                         t=t_input,
