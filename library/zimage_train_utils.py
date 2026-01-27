@@ -89,12 +89,13 @@ def save_zimage_model_on_epoch_end_or_stepwise(
 
 
 def add_zimage_train_arguments(parser: argparse.ArgumentParser):
-    parser.add_argument(
-        "--vae",
-        type=str,
-        required=True,
-        help="path to Z-Image VAE (diffusers directory or safetensors file)",
-    )
+    if "--vae" not in parser._option_string_actions:
+        parser.add_argument(
+            "--vae",
+            type=str,
+            required=True,
+            help="path to Z-Image VAE (diffusers directory or safetensors file)",
+        )
     parser.add_argument(
         "--text_encoder",
         type=str,
