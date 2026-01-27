@@ -122,13 +122,15 @@ def prepare_deepspeed_model(args: argparse.Namespace, **models):
     # remove None from models
     models = {k: v for k, v in models.items() if v is not None}
 
+    mixed_precision = getattr(args, "mixed_precision", "no")
+
     class DeepSpeedWrapper(torch.nn.Module):
         def __init__(self, **kw_models) -> None:
             super().__init__()
             
             self.models = torch.nn.ModuleDict()
             
-            wrap_model_forward_with_torch_autocast = args.mixed_precision is not "no"
+            wrap_model_forward_with_torch_autocast = mixed_precision != "no"
 
             for key, model in kw_models.items():
                 if isinstance(model, list):
@@ -156,7 +158,7 @@ def prepare_deepspeed_model(args: argparse.Namespace, **models):
 
             forward_fn = model.forward
 
-            def forward(*args, **kwargs):
+            def forward(*fwd_args, **kwargs):
                 try:
                     device_type = model.device.type
                 except AttributeError:
@@ -166,19 +168,19 @@ def prepare_deepspeed_model(args: argparse.Namespace, **models):
                     )                    
                     device_type = get_preferred_device().type
 
-                if args.mixed_precision == "bf16":
+                if mixed_precision == "bf16":
                     autocast_dtype = torch.bfloat16
-                elif args.mixed_precision == "fp16":
+                elif mixed_precision == "fp16":
                     autocast_dtype = torch.float16
                 else:
                     autocast_dtype = None
 
                 if autocast_dtype is None:
                     with torch.autocast(device_type=device_type):
-                        return forward_fn(*args, **kwargs)
+                        return forward_fn(*fwd_args, **kwargs)
 
                 with torch.autocast(device_type=device_type, dtype=autocast_dtype):
-                    return forward_fn(*args, **kwargs)
+                    return forward_fn(*fwd_args, **kwargs)
 
             model.forward = forward
             return model
