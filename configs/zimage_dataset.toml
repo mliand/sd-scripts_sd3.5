@@ -16,4 +16,4 @@ caption_extension = ".txt"
   image_dir = "/data/datasets/zimage"
   num_repeats = 1
   caption_extension = ".txt"
-  metadata_file = "/data/cc/workspace/sd-scripts_sd3.5/zimage.json"
+  metadata_file = "/home/cc/workspace/sd-scripts_sd3.5/zimage.json"
