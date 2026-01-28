@@ -302,6 +302,8 @@ def train(args: argparse.Namespace):
     global_step = 0
     epoch = 0
 
+    train_util.init_trackers(accelerator, args, "zimage_train")
+
     optimizer_eval_fn()
     sample_text_encoder = None if sample_prompts_te_outputs is not None and args.cache_text_encoder_outputs else text_encoder
     zimage_train_utils.sample_images(
