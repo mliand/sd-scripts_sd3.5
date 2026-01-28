@@ -292,7 +292,12 @@ def train(args: argparse.Namespace):
         args.max_train_steps = args.max_train_epochs * num_update_steps_per_epoch
     num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
-    progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
+    progress_bar = tqdm(
+        range(args.max_train_steps),
+        smoothing=0,
+        disable=not accelerator.is_local_main_process,
+        desc="steps",
+    )
 
     global_step = 0
     epoch = 0
@@ -306,6 +311,7 @@ def train(args: argparse.Namespace):
     if len(accelerator.trackers) > 0:
         accelerator.log({}, step=0)
 
+    loss_recorder = train_util.LossRecorder()
     for epoch in range(num_train_epochs):
         accelerator.print(f"\nepoch {epoch + 1}/{num_train_epochs}")
         current_epoch.value = epoch + 1
@@ -418,6 +424,16 @@ def train(args: argparse.Namespace):
                             accelerator.unwrap_model(text_encoder) if args.train_text_encoder else None,
                         )
                 optimizer_train_fn()
+
+            current_loss = loss.detach().item()
+            if len(accelerator.trackers) > 0:
+                logs = {"loss": current_loss}
+                train_util.append_lr_to_logs(logs, lr_scheduler, args.optimizer_type, including_unet=True)
+                accelerator.log(logs, step=global_step)
+
+            loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
+            avr_loss: float = loss_recorder.moving_average
+            progress_bar.set_postfix(**{"avr_loss": avr_loss})
 
             if global_step >= args.max_train_steps:
                 break
