@@ -224,6 +224,8 @@ def train(args: argparse.Namespace):
     train_dataset_group.set_current_strategies()
 
     transformer = zimage_utils.load_transformer(args.pretrained_model_name_or_path, weight_dtype, "cpu")
+    if args.gradient_checkpointing:
+        transformer.enable_gradient_checkpointing()
     transformer.requires_grad_(True)
     transformer.train()
 
