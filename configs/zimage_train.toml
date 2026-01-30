@@ -25,9 +25,9 @@ optimizer_type = "AdamW"
 optimizer_args = ["weight_decay=0.1", "betas=0.9,0.99"]
 lr_scheduler = "constant"
 lr_scheduler_num_cycles = 1
-lr_scheduler_type = "cosine_with_restarts"
-lr_scheduler_args = ["T_0=27026", "T_mult=2", "eta_min=1e-6"]
-num_warmup_steps  = 18000
+lr_scheduler_type = "constant_with_warmup"
+#lr_scheduler_args = ["T_0=27026", "T_mult=2", "eta_min=1e-6"]
+num_warmup_steps  = 33000
 deepspeed = true
 zero_stage = 1
 
