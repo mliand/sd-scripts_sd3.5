@@ -185,6 +185,7 @@ class ZImageAttention(nn.Module):
         self.gradient_checkpointing = False
         self._log_gate_stats = False
         self._last_gate_stats = None
+        self._gate_grad_hook = None
 
     def enable_gradient_checkpointing(self):
         self.gradient_checkpointing = True
@@ -196,6 +197,27 @@ class ZImageAttention(nn.Module):
         self._log_gate_stats = enabled
         if not enabled:
             self._last_gate_stats = None
+
+    def set_gate_trainable(self, enabled: bool):
+        if self.gate_dim == 0:
+            return
+        if enabled:
+            if self._gate_grad_hook is not None:
+                self._gate_grad_hook.remove()
+                self._gate_grad_hook = None
+            return
+
+        if self._gate_grad_hook is None:
+            gate_rows = slice(self.n_heads * self.head_dim, self.n_heads * self.head_dim + self.gate_dim)
+
+            def _gate_grad_hook(grad):
+                if grad is None:
+                    return grad
+                grad = grad.clone()
+                grad[gate_rows, :] = 0
+                return grad
+
+            self._gate_grad_hook = self.to_q.weight.register_hook(_gate_grad_hook)
 
     def get_gate_statistics(self) -> Dict[str, float]:
         return self._last_gate_stats or {}
@@ -328,6 +350,10 @@ class ZImageTransformerBlock(nn.Module):
     def set_log_gate_stats(self, enabled: bool):
         if hasattr(self.attention, "set_log_gate_stats"):
             self.attention.set_log_gate_stats(enabled)
+
+    def set_gate_trainable(self, enabled: bool):
+        if hasattr(self.attention, "set_gate_trainable"):
+            self.attention.set_gate_trainable(enabled)
 
     def get_gate_statistics(self) -> Dict[str, float]:
         if hasattr(self.attention, "get_gate_statistics"):
@@ -582,6 +608,11 @@ class ZImageTransformer2DModel(nn.Module):
         for block in self.noise_refiner + self.context_refiner + self.layers:
             if hasattr(block, "set_log_gate_stats"):
                 block.set_log_gate_stats(enabled)
+
+    def set_gate_trainable(self, enabled: bool):
+        for block in self.noise_refiner + self.context_refiner + self.layers:
+            if hasattr(block, "set_gate_trainable"):
+                block.set_gate_trainable(enabled)
 
     def get_gate_statistics(self) -> Dict[str, float]:
         stats: Dict[str, float] = {}

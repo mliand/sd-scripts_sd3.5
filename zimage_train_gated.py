@@ -234,6 +234,9 @@ def train(args: argparse.Namespace):
     )
     if args.gradient_checkpointing:
         transformer.enable_gradient_checkpointing()
+    if args.freeze_gate and hasattr(transformer, "set_gate_trainable"):
+        transformer.set_gate_trainable(False)
+        logger.info("Gate parameters are frozen (no updates).")
     transformer.requires_grad_(True)
     transformer.train()
 
@@ -549,6 +552,11 @@ def setup_parser() -> argparse.ArgumentParser:
         "--log_gate_stats_detailed",
         action="store_true",
         help="Log detailed per-block gate statistics (more verbose)",
+    )
+    parser.add_argument(
+        "--freeze_gate",
+        action="store_true",
+        help="Freeze gated attention parameters (gate weights will not be updated)",
     )
 
     return parser
