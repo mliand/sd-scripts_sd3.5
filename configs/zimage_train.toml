@@ -27,7 +27,7 @@ lr_scheduler = "constant"
 lr_scheduler_num_cycles = 1
 lr_scheduler_type = "CosineAnnealingWarmRestarts"
 lr_scheduler_args = ["T_0=27026", "T_mult=2", "eta_min=1e-6"]
-lr_warmup_steps = 0
+lr_warmup_steps = 18000
 deepspeed = true
 zero_stage = 1
 
