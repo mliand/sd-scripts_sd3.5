@@ -50,9 +50,10 @@ def load_transformer(
     path: str,
     dtype: torch.dtype,
     device: Union[str, torch.device],
+    gate_type: str = "none",
 ):
     logger.info(f"Loading Z-Image transformer from {path}")
-    transformer = load_zimage_model(path, dtype=dtype, device=device)
+    transformer = load_zimage_model(path, dtype=dtype, device=device, gate_type=gate_type)
     return transformer
 
 

@@ -147,6 +147,13 @@ def main():
     parser.add_argument("--output_name", type=str, default=None)
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--bf16", action="store_true")
+    parser.add_argument(
+        "--gate_type",
+        type=str,
+        default="none",
+        choices=["headwise", "elementwise", "none"],
+        help="Type of gating for attention: headwise, elementwise, or none. Default: none",
+    )
     args = parser.parse_args()
 
     device = get_preferred_device()
@@ -157,7 +164,12 @@ def main():
         dtype = torch.bfloat16
 
     logger.info("Loading Z-Image models...")
-    transformer = zimage_utils.load_transformer(args.pretrained_model_name_or_path, dtype, device)
+    transformer = zimage_utils.load_transformer(
+        args.pretrained_model_name_or_path,
+        dtype,
+        device,
+        gate_type=args.gate_type,
+    )
     vae = zimage_utils.load_vae(args.vae, dtype, device)
     text_encoder = zimage_utils.load_text_encoder(args.text_encoder, dtype, device)
 

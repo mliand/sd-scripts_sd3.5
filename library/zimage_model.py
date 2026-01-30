@@ -144,22 +144,47 @@ def apply_rotary_emb(x_in: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tenso
 class ZImageAttention(nn.Module):
     _attention_backend = None
 
-    def __init__(self, dim: int, n_heads: int, n_kv_heads: int, qk_norm: bool = True, eps: float = 1e-5, use_16bit: bool = False):
+    def __init__(
+        self,
+        dim: int,
+        n_heads: int,
+        n_kv_heads: int,
+        qk_norm: bool = True,
+        eps: float = 1e-5,
+        use_16bit: bool = False,
+        gate_type: str = "none",
+    ):
         super().__init__()
         self.n_heads = n_heads
         self.n_kv_heads = n_kv_heads
         self.head_dim = dim // n_heads
         self.use_16bit = use_16bit
+        self.gate_type = gate_type
 
-        self.to_q = nn.Linear(dim, n_heads * self.head_dim, bias=False)
+        if gate_type == "headwise":
+            self.gate_dim = n_heads
+        elif gate_type == "elementwise":
+            self.gate_dim = dim
+        elif gate_type == "none":
+            self.gate_dim = 0
+        else:
+            raise ValueError(f"Unsupported gate_type: {gate_type}")
+
+        self.to_q = nn.Linear(dim, n_heads * self.head_dim + self.gate_dim, bias=False)
         self.to_k = nn.Linear(dim, n_kv_heads * self.head_dim, bias=False)
         self.to_v = nn.Linear(dim, n_kv_heads * self.head_dim, bias=False)
         self.to_out = nn.ModuleList([nn.Linear(n_heads * self.head_dim, dim, bias=False)])
+
+        if self.gate_dim > 0:
+            with torch.no_grad():
+                self.to_q.weight[n_heads * self.head_dim :, :].zero_()
 
         self.norm_q = RMSNorm(self.head_dim, eps=eps) if qk_norm else None
         self.norm_k = RMSNorm(self.head_dim, eps=eps) if qk_norm else None
 
         self.gradient_checkpointing = False
+        self._log_gate_stats = False
+        self._last_gate_stats = None
 
     def enable_gradient_checkpointing(self):
         self.gradient_checkpointing = True
@@ -167,14 +192,41 @@ class ZImageAttention(nn.Module):
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
 
+    def set_log_gate_stats(self, enabled: bool):
+        self._log_gate_stats = enabled
+        if not enabled:
+            self._last_gate_stats = None
+
+    def get_gate_statistics(self) -> Dict[str, float]:
+        return self._last_gate_stats or {}
+
+    @staticmethod
+    def _compute_gate_statistics(gate_values: torch.Tensor) -> Dict[str, float]:
+        stats = {
+            "gate_mean": gate_values.mean().item(),
+            "gate_std": gate_values.std().item(),
+            "gate_min": gate_values.min().item(),
+            "gate_max": gate_values.max().item(),
+            "gate_sparsity": (gate_values < 0.5).float().mean().item(),
+        }
+        return stats
+
     def _forward(
         self, hidden_states: torch.Tensor, freqs_cis: Optional[torch.Tensor] = None, attn_params: Optional[AttentionParams] = None
     ) -> torch.Tensor:
+        gate_score = None
         query = self.to_q(hidden_states)
         key = self.to_k(hidden_states)
         value = self.to_v(hidden_states)
 
-        query = query.unflatten(-1, (self.n_heads, -1))  # [B, seq_len, n_heads, head_dim]
+        if self.gate_type == "headwise":
+            query = query.reshape(query.shape[0], query.shape[1], self.n_heads, self.head_dim + 1)
+            query, gate_score = torch.split(query, [self.head_dim, 1], dim=-1)
+        elif self.gate_type == "elementwise":
+            query = query.reshape(query.shape[0], query.shape[1], self.n_heads, self.head_dim * 2)
+            query, gate_score = torch.split(query, [self.head_dim, self.head_dim], dim=-1)
+        else:
+            query = query.unflatten(-1, (self.n_heads, -1))  # [B, seq_len, n_heads, head_dim]
         key = key.unflatten(-1, (self.n_kv_heads, -1))
         value = value.unflatten(-1, (self.n_kv_heads, -1))
 
@@ -196,6 +248,15 @@ class ZImageAttention(nn.Module):
         del query, key, value
         hidden_states = attention(qkv, attn_params=attn_params)
         del qkv
+
+        if gate_score is not None:
+            gate_values = torch.sigmoid(gate_score)
+            hidden_states = hidden_states.reshape(hidden_states.shape[0], hidden_states.shape[1], self.n_heads, self.head_dim)
+            hidden_states = hidden_states * gate_values
+            if self._log_gate_stats:
+                with torch.no_grad():
+                    self._last_gate_stats = self._compute_gate_statistics(gate_values)
+            hidden_states = hidden_states.reshape(hidden_states.shape[0], hidden_states.shape[1], -1)
 
         hidden_states = hidden_states.to(dtype)
 
@@ -222,6 +283,7 @@ class ZImageTransformerBlock(nn.Module):
         qk_norm: bool,
         modulation=True,
         use_16bit: bool = False,
+        gate_type: str = "none",
     ):
         super().__init__()
         self.dim = dim
@@ -229,7 +291,15 @@ class ZImageTransformerBlock(nn.Module):
         self.layer_id = layer_id
         self.modulation = modulation
 
-        self.attention = ZImageAttention(dim, n_heads, n_kv_heads, qk_norm, norm_eps, use_16bit=use_16bit)
+        self.attention = ZImageAttention(
+            dim,
+            n_heads,
+            n_kv_heads,
+            qk_norm,
+            norm_eps,
+            use_16bit=use_16bit,
+            gate_type=gate_type,
+        )
         self.feed_forward = FeedForward(dim=dim, hidden_dim=int(dim / 3 * 8))
 
         self.attention_norm1 = RMSNorm(dim, eps=norm_eps)
@@ -254,6 +324,15 @@ class ZImageTransformerBlock(nn.Module):
         self.activation_cpu_offloading = False
         self.feed_forward.disable_gradient_checkpointing()
         self.attention.disable_gradient_checkpointing()
+
+    def set_log_gate_stats(self, enabled: bool):
+        if hasattr(self.attention, "set_log_gate_stats"):
+            self.attention.set_log_gate_stats(enabled)
+
+    def get_gate_statistics(self) -> Dict[str, float]:
+        if hasattr(self.attention, "get_gate_statistics"):
+            return self.attention.get_gate_statistics()
+        return {}
 
     def _forward(
         self,
@@ -372,6 +451,7 @@ class ZImageTransformer2DModel(nn.Module):
         attn_mode: str = "torch",
         split_attn: bool = False,
         use_16bit_for_attention: bool = False,
+        gate_type: str = "none",
     ):
         super().__init__()
         self.in_channels = in_channels
@@ -384,6 +464,7 @@ class ZImageTransformer2DModel(nn.Module):
         self.t_scale = t_scale
         self.attn_mode = attn_mode
         self.split_attn = split_attn
+        self.gate_type = gate_type
 
         assert len(all_patch_size) == len(all_f_patch_size)
 
@@ -401,7 +482,15 @@ class ZImageTransformer2DModel(nn.Module):
         self.noise_refiner = nn.ModuleList(
             [
                 ZImageTransformerBlock(
-                    1000 + layer_id, dim, n_heads, n_kv_heads, norm_eps, qk_norm, modulation=True, use_16bit=use_16bit_for_attention
+                    1000 + layer_id,
+                    dim,
+                    n_heads,
+                    n_kv_heads,
+                    norm_eps,
+                    qk_norm,
+                    modulation=True,
+                    use_16bit=use_16bit_for_attention,
+                    gate_type=gate_type,
                 )
                 for layer_id in range(n_refiner_layers)
             ]
@@ -410,7 +499,15 @@ class ZImageTransformer2DModel(nn.Module):
         self.context_refiner = nn.ModuleList(
             [
                 ZImageTransformerBlock(
-                    layer_id, dim, n_heads, n_kv_heads, norm_eps, qk_norm, modulation=False, use_16bit=use_16bit_for_attention
+                    layer_id,
+                    dim,
+                    n_heads,
+                    n_kv_heads,
+                    norm_eps,
+                    qk_norm,
+                    modulation=False,
+                    use_16bit=use_16bit_for_attention,
+                    gate_type=gate_type,
                 )
                 for layer_id in range(n_refiner_layers)
             ]
@@ -427,7 +524,16 @@ class ZImageTransformer2DModel(nn.Module):
 
         self.layers = nn.ModuleList(
             [
-                ZImageTransformerBlock(layer_id, dim, n_heads, n_kv_heads, norm_eps, qk_norm, use_16bit=use_16bit_for_attention)
+                ZImageTransformerBlock(
+                    layer_id,
+                    dim,
+                    n_heads,
+                    n_kv_heads,
+                    norm_eps,
+                    qk_norm,
+                    use_16bit=use_16bit_for_attention,
+                    gate_type=gate_type,
+                )
                 for layer_id in range(n_layers)
             ]
         )
@@ -471,6 +577,40 @@ class ZImageTransformer2DModel(nn.Module):
             block.disable_gradient_checkpointing()
 
         print("Z-Image: Gradient checkpointing disabled.")
+
+    def set_log_gate_stats(self, enabled: bool):
+        for block in self.noise_refiner + self.context_refiner + self.layers:
+            if hasattr(block, "set_log_gate_stats"):
+                block.set_log_gate_stats(enabled)
+
+    def get_gate_statistics(self) -> Dict[str, float]:
+        stats: Dict[str, float] = {}
+        gate_means: List[float] = []
+        gate_sparsities: List[float] = []
+
+        for prefix, blocks in (
+            ("noise_refiner", self.noise_refiner),
+            ("context_refiner", self.context_refiner),
+            ("layer", self.layers),
+        ):
+            for idx, block in enumerate(blocks):
+                if not hasattr(block, "get_gate_statistics"):
+                    continue
+                block_stats = block.get_gate_statistics()
+                for stat_name, stat_value in block_stats.items():
+                    key = f"{prefix}_{idx}/{stat_name}"
+                    stats[key] = stat_value
+                    if stat_name == "gate_mean":
+                        gate_means.append(stat_value)
+                    elif stat_name == "gate_sparsity":
+                        gate_sparsities.append(stat_value)
+
+        if gate_means:
+            stats["gate_mean_overall"] = sum(gate_means) / len(gate_means)
+        if gate_sparsities:
+            stats["gate_sparsity_overall"] = sum(gate_sparsities) / len(gate_sparsities)
+
+        return stats
 
     def enable_block_swap(self, num_blocks: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False):
         self.blocks_to_swap = num_blocks
@@ -718,7 +858,7 @@ class ZImageTransformer2DModel(nn.Module):
 
 
 
-def create_model(attn_mode: str, split_attn: bool, dtype: Optional[torch.dtype]) -> ZImageTransformer2DModel:
+def create_model(attn_mode: str, split_attn: bool, dtype: Optional[torch.dtype], gate_type: str = "none") -> ZImageTransformer2DModel:
     with init_empty_weights():
         logger.info("Creating ZImageTransformer2DModel")
         model = ZImageTransformer2DModel(
@@ -739,6 +879,7 @@ def create_model(attn_mode: str, split_attn: bool, dtype: Optional[torch.dtype])
             axes_lens=zimage_config.ROPE_AXES_LENS,
             attn_mode=attn_mode,
             split_attn=split_attn,
+            gate_type=gate_type,
         )
         if dtype is not None:
             model.to(dtype)
@@ -823,6 +964,57 @@ def _convert_state_dict_keys(state_dict: Dict[str, torch.Tensor]) -> Dict[str, t
     return new_sd
 
 
+def _expand_state_dict_for_gating(
+    state_dict: Dict[str, torch.Tensor],
+    gate_type: str,
+    n_heads: int,
+    dim: int,
+) -> Dict[str, torch.Tensor]:
+    if gate_type == "none":
+        return state_dict
+
+    if gate_type == "headwise":
+        gate_dim = n_heads
+    elif gate_type == "elementwise":
+        gate_dim = dim
+    else:
+        raise ValueError(f"Unsupported gate_type: {gate_type}")
+
+    base_out = dim
+    expected_out = dim + gate_dim
+    new_sd: Dict[str, torch.Tensor] = {}
+
+    for key, value in state_dict.items():
+        if ".attention.to_q.weight" in key:
+            if value.shape[0] == expected_out:
+                new_sd[key] = value
+            elif value.shape[0] == base_out:
+                new_weight = torch.zeros((expected_out, value.shape[1]), dtype=value.dtype, device=value.device)
+                new_weight[:base_out] = value
+                new_sd[key] = new_weight
+            else:
+                raise ValueError(
+                    f"Unexpected to_q.weight shape for {key}: {tuple(value.shape)} "
+                    f"(expected {base_out} or {expected_out} rows)"
+                )
+        elif ".attention.to_q.bias" in key:
+            if value.shape[0] == expected_out:
+                new_sd[key] = value
+            elif value.shape[0] == base_out:
+                new_bias = torch.zeros(expected_out, dtype=value.dtype, device=value.device)
+                new_bias[:base_out] = value
+                new_sd[key] = new_bias
+            else:
+                raise ValueError(
+                    f"Unexpected to_q.bias shape for {key}: {tuple(value.shape)} "
+                    f"(expected {base_out} or {expected_out})"
+                )
+        else:
+            new_sd[key] = value
+
+    return new_sd
+
+
 def load_zimage_model(
     dit_path: str,
     dtype: Optional[torch.dtype],
@@ -830,11 +1022,12 @@ def load_zimage_model(
     attn_mode: str = "torch",
     split_attn: bool = False,
     disable_mmap: bool = False,
+    gate_type: str = "none",
 ) -> ZImageTransformer2DModel:
     from library.utils import load_safetensors
 
     device = torch.device(device)
-    model = create_model(attn_mode, split_attn, dtype)
+    model = create_model(attn_mode, split_attn, dtype, gate_type=gate_type)
 
     weight_files = _find_weight_files(dit_path)
     logger.info(f"Loading DiT weights from: {weight_files}")
@@ -844,6 +1037,7 @@ def load_zimage_model(
         sd.update(load_safetensors(file_path, device="cpu", disable_mmap=disable_mmap, dtype=None))
 
     sd = _convert_state_dict_keys(sd)
+    sd = _expand_state_dict_for_gating(sd, gate_type, model.n_heads, model.dim)
 
     info = model.load_state_dict(sd, strict=False, assign=True)
     logger.info(f"Loaded DiT weights, info={info}")
