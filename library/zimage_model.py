@@ -160,6 +160,7 @@ class ZImageAttention(nn.Module):
         self.head_dim = dim // n_heads
         self.use_16bit = use_16bit
         self.gate_type = gate_type
+        self.gate_enabled = True
 
         if gate_type == "headwise":
             self.gate_dim = n_heads
@@ -197,6 +198,9 @@ class ZImageAttention(nn.Module):
         self._log_gate_stats = enabled
         if not enabled:
             self._last_gate_stats = None
+
+    def set_gate_enabled(self, enabled: bool):
+        self.gate_enabled = enabled
 
     def set_gate_trainable(self, enabled: bool):
         if self.gate_dim == 0:
@@ -244,9 +248,13 @@ class ZImageAttention(nn.Module):
         if self.gate_type == "headwise":
             query = query.reshape(query.shape[0], query.shape[1], self.n_heads, self.head_dim + 1)
             query, gate_score = torch.split(query, [self.head_dim, 1], dim=-1)
+            if not self.gate_enabled:
+                gate_score = None
         elif self.gate_type == "elementwise":
             query = query.reshape(query.shape[0], query.shape[1], self.n_heads, self.head_dim * 2)
             query, gate_score = torch.split(query, [self.head_dim, self.head_dim], dim=-1)
+            if not self.gate_enabled:
+                gate_score = None
         else:
             query = query.unflatten(-1, (self.n_heads, -1))  # [B, seq_len, n_heads, head_dim]
         key = key.unflatten(-1, (self.n_kv_heads, -1))
@@ -354,6 +362,10 @@ class ZImageTransformerBlock(nn.Module):
     def set_gate_trainable(self, enabled: bool):
         if hasattr(self.attention, "set_gate_trainable"):
             self.attention.set_gate_trainable(enabled)
+
+    def set_gate_enabled(self, enabled: bool):
+        if hasattr(self.attention, "set_gate_enabled"):
+            self.attention.set_gate_enabled(enabled)
 
     def get_gate_statistics(self) -> Dict[str, float]:
         if hasattr(self.attention, "get_gate_statistics"):
@@ -613,6 +625,24 @@ class ZImageTransformer2DModel(nn.Module):
         for block in self.noise_refiner + self.context_refiner + self.layers:
             if hasattr(block, "set_gate_trainable"):
                 block.set_gate_trainable(enabled)
+
+    def set_gate_layers(
+        self,
+        layer_ids: Optional[List[int]] = None,
+        noise_refiner_ids: Optional[List[int]] = None,
+        context_refiner_ids: Optional[List[int]] = None,
+    ):
+        def apply(blocks, enabled_ids):
+            if enabled_ids is None:
+                return
+            enabled = set(enabled_ids)
+            for idx, block in enumerate(blocks):
+                if hasattr(block, "set_gate_enabled"):
+                    block.set_gate_enabled(idx in enabled)
+
+        apply(self.layers, layer_ids)
+        apply(self.noise_refiner, noise_refiner_ids)
+        apply(self.context_refiner, context_refiner_ids)
 
     def get_gate_statistics(self) -> Dict[str, float]:
         stats: Dict[str, float] = {}

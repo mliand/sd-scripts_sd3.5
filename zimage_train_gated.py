@@ -232,6 +232,47 @@ def train(args: argparse.Namespace):
         "cpu",
         gate_type=args.gate_type,
     )
+
+    def _parse_layer_spec(text: str):
+        if text in ("", "all"):
+            return None
+        parts = [p for p in text.replace(",", " ").split() if p]
+        indices = []
+        for part in parts:
+            if "-" in part:
+                start, end = part.split("-", 1)
+                start = int(start)
+                end = int(end)
+                if end < start:
+                    start, end = end, start
+                indices.extend(range(start, end + 1))
+            else:
+                indices.append(int(part))
+        return sorted(set(indices))
+
+    def _normalize_gate_layers(value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return _parse_layer_spec(value)
+        if isinstance(value, list):
+            return sorted(set(int(x) for x in value))
+        return value
+
+    args.gate_layers = _normalize_gate_layers(args.gate_layers)
+    args.gate_layers_noise_refiner = _normalize_gate_layers(args.gate_layers_noise_refiner)
+    args.gate_layers_context_refiner = _normalize_gate_layers(args.gate_layers_context_refiner)
+
+    if any(
+        v is not None
+        for v in (args.gate_layers, args.gate_layers_noise_refiner, args.gate_layers_context_refiner)
+    ) and hasattr(transformer, "set_gate_layers"):
+        transformer.set_gate_layers(
+            layer_ids=args.gate_layers,
+            noise_refiner_ids=args.gate_layers_noise_refiner,
+            context_refiner_ids=args.gate_layers_context_refiner,
+        )
+        logger.info("Applied gated attention layer mask.")
     if args.gradient_checkpointing:
         transformer.enable_gradient_checkpointing()
     if args.freeze_gate and hasattr(transformer, "set_gate_trainable"):
@@ -557,6 +598,24 @@ def setup_parser() -> argparse.ArgumentParser:
         "--freeze_gate",
         action="store_true",
         help="Freeze gated attention parameters (gate weights will not be updated)",
+    )
+    parser.add_argument(
+        "--gate_layers",
+        type=lambda s: [int(x) for x in s.split(",")] if s not in (None, "", "all") else None,
+        default=None,
+        help="Layer indices (0-based) to enable gated attention in main layers. Accepts commas/spaces/ranges, e.g. '0,1 3-5'. Use 'all' for all layers",
+    )
+    parser.add_argument(
+        "--gate_layers_noise_refiner",
+        type=lambda s: [int(x) for x in s.split(",")] if s not in (None, "", "all") else None,
+        default=None,
+        help="Layer indices to enable gated attention in noise refiner. Accepts commas/spaces/ranges, e.g. '0-1 3'",
+    )
+    parser.add_argument(
+        "--gate_layers_context_refiner",
+        type=lambda s: [int(x) for x in s.split(",")] if s not in (None, "", "all") else None,
+        default=None,
+        help="Layer indices to enable gated attention in context refiner. Accepts commas/spaces/ranges, e.g. '0 2-3'",
     )
 
     return parser
