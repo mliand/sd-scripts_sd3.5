@@ -156,19 +156,19 @@ def main():
     )
     parser.add_argument(
         "--gate_layers",
-        type=lambda s: [int(x) for x in s.split(",")] if s not in (None, "", "all") else None,
+        type=str,
         default=None,
         help="Layer indices (0-based) to enable gated attention in main layers. Accepts commas/spaces/ranges, e.g. '0,1 3-5'. Use 'all' for all layers",
     )
     parser.add_argument(
         "--gate_layers_noise_refiner",
-        type=lambda s: [int(x) for x in s.split(",")] if s not in (None, "", "all") else None,
+        type=str,
         default=None,
         help="Layer indices to enable gated attention in noise refiner. Accepts commas/spaces/ranges, e.g. '0-1 3'",
     )
     parser.add_argument(
         "--gate_layers_context_refiner",
-        type=lambda s: [int(x) for x in s.split(",")] if s not in (None, "", "all") else None,
+        type=str,
         default=None,
         help="Layer indices to enable gated attention in context refiner. Accepts commas/spaces/ranges, e.g. '0 2-3'",
     )
