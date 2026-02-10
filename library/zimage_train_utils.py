@@ -189,8 +189,9 @@ def _decode_latents(vae, latents: torch.Tensor) -> torch.Tensor:
 
 
 def _latents_to_pil(latents: torch.Tensor) -> Image.Image:
-    image = (latents / 2 + 0.5).clamp(0, 1)
-    image = image.detach().cpu()
+    image = (latents / 2 + 0.5)
+    # numpy/PIL cannot handle bf16 directly; also guard against NaN/Inf from decode.
+    image = torch.nan_to_num(image.detach().to(torch.float32), nan=0.0, posinf=1.0, neginf=0.0).clamp(0, 1).cpu()
     if image.ndim == 4:
         image = image[0]
     image = image.permute(1, 2, 0).numpy()
