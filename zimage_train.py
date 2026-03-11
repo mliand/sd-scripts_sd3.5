@@ -141,6 +141,7 @@ def train(args: argparse.Namespace):
                     args.skip_cache_check,
                     False,
                     max_length=args.max_token_length,
+                    apply_chat_template=not args.disable_chat_template,
                 )
             )
         train_dataset_group.set_current_strategies()
@@ -195,6 +196,7 @@ def train(args: argparse.Namespace):
             args.skip_cache_check,
             is_partial=args.train_text_encoder,
             max_length=args.max_token_length,
+            apply_chat_template=not args.disable_chat_template,
         )
         strategy_base.TextEncoderOutputsCachingStrategy.set_strategy(text_encoder_caching_strategy)
 

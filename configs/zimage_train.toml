@@ -9,8 +9,8 @@ output_name = "zimage_full"
 logging_dir = "/data/cc/zimage/logs"
 log_with = "tensorboard"
 
-max_token_length = 256
-disable_chat_template = true
+max_token_length = 512
+disable_chat_template = false
 
 mixed_precision = "bf16"
 full_bf16 = false

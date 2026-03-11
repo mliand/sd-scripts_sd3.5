@@ -95,9 +95,11 @@ class ZImageTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy)
         skip_disk_cache_validity_check: bool,
         is_partial: bool = False,
         max_length: int = 512,
+        apply_chat_template: bool = True,
     ) -> None:
         super().__init__(cache_to_disk, batch_size, skip_disk_cache_validity_check, is_partial)
         self.max_length = max_length
+        self.apply_chat_template = apply_chat_template
 
     def get_outputs_npz_path(self, image_abs_path: str) -> str:
         return os.path.splitext(image_abs_path)[0] + ZImageTextEncoderOutputsCachingStrategy.ZIMAGE_TEXT_ENCODER_OUTPUTS_NPZ_SUFFIX
@@ -119,6 +121,10 @@ class ZImageTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy)
             if "max_length" not in npz:
                 return False
             if int(npz["max_length"]) != self.max_length:
+                return False
+            if "apply_chat_template" not in npz:
+                return False
+            if bool(npz["apply_chat_template"]) != self.apply_chat_template:
                 return False
         except Exception as e:
             logger.error(f"Error loading file: {npz_path}")
@@ -156,6 +162,7 @@ class ZImageTextEncoderOutputsCachingStrategy(TextEncoderOutputsCachingStrategy)
                     prompt_embeds=prompt_embeds_i,
                     attention_mask=attention_mask_i,
                     max_length=self.max_length,
+                    apply_chat_template=self.apply_chat_template,
                 )
             else:
                 info.text_encoder_outputs = (prompt_embeds_i, attention_mask_i)

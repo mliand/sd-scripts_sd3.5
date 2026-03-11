@@ -40,6 +40,7 @@ def cache_to_disk(args: argparse.Namespace) -> None:
         args.skip_cache_check,
         is_partial=False,
         max_length=args.max_token_length,
+        apply_chat_template=not args.disable_chat_template,
     )
     strategy_base.TextEncoderOutputsCachingStrategy.set_strategy(text_encoder_outputs_caching_strategy)
 
