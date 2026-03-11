@@ -419,7 +419,7 @@ def main():
     parser.add_argument("--vae", type=str, default="/data/models/Z-Image/vae")
     parser.add_argument("--text_encoder", type=str, default="/data/models/Z-Image/text_encoder")
     parser.add_argument("--tokenizer", type=str, default="/data/models/Z-Image/tokenizer")
-    parser.add_argument("--gate_type", type=str, default="headwise", choices=["headwise", "elementwise", "none"])
+    parser.add_argument("--gate_type", type=str, default="elementwise", choices=["headwise", "elementwise", "none"])
     parser.add_argument("--gate_layers", type=str, default="")
     parser.add_argument("--gate_layers_noise_refiner", type=str, default="")
     parser.add_argument("--gate_layers_context_refiner", type=str, default="")
