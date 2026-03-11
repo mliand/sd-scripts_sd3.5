@@ -180,80 +180,97 @@ def generate_single_image(
     height = max(64, int(height) - int(height) % 16)
     width = max(64, int(width) - int(width) % 16)
 
-    prompt_embeds, prompt_mask = zimage_train_utils._encode_prompt(
-        tokenize_strategy,
-        encoding_strategy,
-        text_encoder,
-        prompt,
-        None,
-        device,
-        dtype,
-    )
+    prompt_embeds = None
+    prompt_mask = None
+    negative_embeds = None
+    negative_mask = None
+    latents = None
+    decoded = None
 
-    patch_size = transformer.all_patch_size[0] if hasattr(transformer, "all_patch_size") else 2
-    image_sequence_length = (height // 8 // patch_size) * (width // 8 // patch_size)
-    prompt_embeds, prompt_mask = zimage_train_utils._trim_pad_embeds_and_mask(image_sequence_length, prompt_embeds, prompt_mask)
-    prompt_embeds = prompt_embeds.to(dtype=dtype)
+    try:
+        with torch.inference_mode():
+            prompt_embeds, prompt_mask = zimage_train_utils._encode_prompt(
+                tokenize_strategy,
+                encoding_strategy,
+                text_encoder,
+                prompt,
+                None,
+                device,
+                dtype,
+            )
 
-    do_cfg = guidance_scale > 1.0
-    if do_cfg:
-        negative_embeds, negative_mask = zimage_train_utils._encode_prompt(
-            tokenize_strategy,
-            encoding_strategy,
-            text_encoder,
-            negative_prompt or "",
-            None,
-            device,
-            dtype,
-        )
-        negative_embeds, negative_mask = zimage_train_utils._trim_pad_embeds_and_mask(
-            image_sequence_length, negative_embeds, negative_mask
-        )
-        negative_embeds = negative_embeds.to(dtype=dtype)
-    else:
-        negative_embeds = None
-        negative_mask = None
+            patch_size = transformer.all_patch_size[0] if hasattr(transformer, "all_patch_size") else 2
+            image_sequence_length = (height // 8 // patch_size) * (width // 8 // patch_size)
+            prompt_embeds, prompt_mask = zimage_train_utils._trim_pad_embeds_and_mask(
+                image_sequence_length, prompt_embeds, prompt_mask
+            )
+            prompt_embeds = prompt_embeds.to(dtype=dtype)
 
-    generator = torch.Generator(device=device).manual_seed(seed)
-    latents = torch.randn(
-        (1, getattr(transformer, "in_channels", 16), height // 8, width // 8),
-        device=device,
-        dtype=torch.float32,
-        generator=generator,
-    )
-
-    timesteps, sigmas = zimage_train_utils._get_timesteps_sigmas(int(steps), float(discrete_flow_shift))
-    timesteps = timesteps.to(device)
-    sigmas = sigmas.to(device)
-
-    step_iter = progress.tqdm(range(len(timesteps)), desc=f"Seed {seed}", total=len(timesteps), unit="step")
-    with torch.autocast(device_type=device.type, dtype=dtype), torch.no_grad():
-        for i in step_iter:
-            t = timesteps[i]
-            timestep = t.expand(latents.shape[0])
-            timestep = (1000 - timestep) / 1000
-
-            latent_model_input = latents.to(dtype).unsqueeze(2)
-            model_out = transformer(x=latent_model_input, t=timestep, cap_feats=prompt_embeds, cap_mask=prompt_mask)
-
+            do_cfg = guidance_scale > 1.0
             if do_cfg:
-                neg_out = transformer(
-                    x=latent_model_input,
-                    t=timestep,
-                    cap_feats=negative_embeds,
-                    cap_mask=negative_mask,
+                negative_embeds, negative_mask = zimage_train_utils._encode_prompt(
+                    tokenize_strategy,
+                    encoding_strategy,
+                    text_encoder,
+                    negative_prompt or "",
+                    None,
+                    device,
+                    dtype,
                 )
-                noise_pred = model_out + guidance_scale * (model_out - neg_out)
+                negative_embeds, negative_mask = zimage_train_utils._trim_pad_embeds_and_mask(
+                    image_sequence_length, negative_embeds, negative_mask
+                )
+                negative_embeds = negative_embeds.to(dtype=dtype)
             else:
-                noise_pred = model_out
+                negative_embeds = None
+                negative_mask = None
 
-            noise_pred = -noise_pred.squeeze(2)
-            latents = zimage_train_utils._step(noise_pred.to(torch.float32), latents, sigmas, i)
+            generator = torch.Generator(device=device).manual_seed(seed)
+            latents = torch.randn(
+                (1, getattr(transformer, "in_channels", 16), height // 8, width // 8),
+                device=device,
+                dtype=torch.float32,
+                generator=generator,
+            )
 
-    latents = latents.to(vae.dtype)
-    latents = zimage_train_utils._unscale_latents(latents, vae)
-    decoded = zimage_train_utils._decode_latents(vae, latents)
-    return zimage_train_utils._latents_to_pil(decoded)
+            timesteps, sigmas = zimage_train_utils._get_timesteps_sigmas(int(steps), float(discrete_flow_shift))
+            timesteps = timesteps.to(device)
+            sigmas = sigmas.to(device)
+
+            step_iter = progress.tqdm(range(len(timesteps)), desc=f"Seed {seed}", total=len(timesteps), unit="step")
+            with torch.autocast(device_type=device.type, dtype=dtype):
+                for i in step_iter:
+                    t = timesteps[i]
+                    timestep = t.expand(latents.shape[0])
+                    timestep = (1000 - timestep) / 1000
+
+                    latent_model_input = latents.to(dtype).unsqueeze(2)
+                    model_out = transformer(x=latent_model_input, t=timestep, cap_feats=prompt_embeds, cap_mask=prompt_mask)
+
+                    if do_cfg:
+                        neg_out = transformer(
+                            x=latent_model_input,
+                            t=timestep,
+                            cap_feats=negative_embeds,
+                            cap_mask=negative_mask,
+                        )
+                        noise_pred = model_out + guidance_scale * (model_out - neg_out)
+                    else:
+                        noise_pred = model_out
+
+                    noise_pred = -noise_pred.squeeze(2)
+                    latents = zimage_train_utils._step(noise_pred.to(torch.float32), latents, sigmas, i)
+
+                latents = latents.to(vae.dtype)
+                latents = zimage_train_utils._unscale_latents(latents, vae)
+                decoded = zimage_train_utils._decode_latents(vae, latents)
+                image = zimage_train_utils._latents_to_pil(decoded)
+
+        return image
+    finally:
+        del prompt_embeds, prompt_mask, negative_embeds, negative_mask, latents, decoded
+        if torch.cuda.is_available():
+            clean_memory_on_device(device)
 
 
 def build_demo(defaults):
@@ -444,7 +461,7 @@ def main():
             "disable_chat_template": False,
         }
     )
-    demo.queue().launch(server_name=args.server_name, server_port=args.server_port, share=args.share)
+    demo.queue(default_concurrency_limit=1).launch(server_name=args.server_name, server_port=args.server_port, share=args.share)
 
 
 if __name__ == "__main__":
