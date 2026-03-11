@@ -377,7 +377,7 @@ def sample_image_inference(
     sample_steps = prompt_dict.get("sample_steps", 30)
     width = prompt_dict.get("width", 512)
     height = prompt_dict.get("height", 512)
-    guidance_scale = prompt_dict.get("guidance_scale", prompt_dict.get("scale", 7.5))
+    guidance_scale = prompt_dict.get("guidance_scale", prompt_dict.get("scale", 4.0))
     seed = prompt_dict.get("seed")
 
     if prompt_replacement is not None:
@@ -397,8 +397,8 @@ def sample_image_inference(
     if negative_prompt is None:
         negative_prompt = ""
 
-    height = max(64, height - height % 8)
-    width = max(64, width - width % 8)
+    height = max(64, height - height % 16)
+    width = max(64, width - width % 16)
     logger.info(f"prompt: {prompt}")
     logger.info(f"negative_prompt: {negative_prompt}")
     logger.info(f"height: {height}")
@@ -478,7 +478,7 @@ def sample_image_inference(
                 cap_feats=negative_embeds,
                 cap_mask=negative_mask,
             )
-            noise_pred = neg_out + guidance_scale * (model_out - neg_out)
+            noise_pred = model_out + guidance_scale * (model_out - neg_out)
         else:
             noise_pred = model_out
 
