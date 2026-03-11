@@ -260,31 +260,19 @@ def build_demo(defaults):
     device = get_preferred_device()
     manager = ModelManager(device)
 
-    def load_model(
-        model_path,
-        vae_path,
-        text_encoder_path,
-        tokenizer_path,
-        dtype_name,
-        gate_type,
-        gate_layers,
-        gate_layers_noise_refiner,
-        gate_layers_context_refiner,
-        max_token_length,
-        disable_chat_template,
-    ):
+    def load_model():
         return manager.ensure_loaded(
-            model_path,
-            vae_path,
-            text_encoder_path,
-            tokenizer_path,
-            dtype_name,
-            gate_type,
-            gate_layers,
-            gate_layers_noise_refiner,
-            gate_layers_context_refiner,
-            int(max_token_length),
-            bool(disable_chat_template),
+            defaults["model_path"],
+            defaults["vae_path"],
+            defaults["text_encoder_path"],
+            defaults["tokenizer_path"],
+            defaults["dtype_name"],
+            defaults["gate_type"],
+            defaults["gate_layers"],
+            defaults["gate_layers_noise_refiner"],
+            defaults["gate_layers_context_refiner"],
+            int(defaults["max_token_length"]),
+            bool(defaults["disable_chat_template"]),
         )
 
     def unload_model():
@@ -292,17 +280,6 @@ def build_demo(defaults):
         return "Model unloaded."
 
     def generate(
-        model_path,
-        vae_path,
-        text_encoder_path,
-        tokenizer_path,
-        dtype_name,
-        gate_type,
-        gate_layers,
-        gate_layers_noise_refiner,
-        gate_layers_context_refiner,
-        max_token_length,
-        disable_chat_template,
         prompt,
         negative_prompt,
         guidance_scale,
@@ -316,17 +293,17 @@ def build_demo(defaults):
         progress=gr.Progress(track_tqdm=True),
     ):
         load_message = manager.ensure_loaded(
-            model_path,
-            vae_path,
-            text_encoder_path,
-            tokenizer_path,
-            dtype_name,
-            gate_type,
-            gate_layers,
-            gate_layers_noise_refiner,
-            gate_layers_context_refiner,
-            int(max_token_length),
-            bool(disable_chat_template),
+            defaults["model_path"],
+            defaults["vae_path"],
+            defaults["text_encoder_path"],
+            defaults["tokenizer_path"],
+            defaults["dtype_name"],
+            defaults["gate_type"],
+            defaults["gate_layers"],
+            defaults["gate_layers_noise_refiner"],
+            defaults["gate_layers_context_refiner"],
+            int(defaults["max_token_length"]),
+            bool(defaults["disable_chat_template"]),
         )
 
         if resolution_preset and resolution_preset != "Custom":
@@ -336,7 +313,10 @@ def build_demo(defaults):
 
         batch_size = max(1, int(batch_size))
         steps = max(1, int(steps))
-        start_seed = int(seed) if seed not in (None, "") else random.randint(0, 2**31 - 1)
+        if seed in (None, "", -1):
+            start_seed = random.randint(0, 2**31 - 1)
+        else:
+            start_seed = int(seed)
 
         images = []
         seed_list = []
@@ -372,26 +352,19 @@ def build_demo(defaults):
 
         with gr.Row():
             with gr.Column(scale=1):
-                model_path = gr.Textbox(label="Model Path", value=defaults["model_path"])
-                vae_path = gr.Textbox(label="VAE Path", value=defaults["vae_path"])
-                text_encoder_path = gr.Textbox(label="Text Encoder Path", value=defaults["text_encoder_path"])
-                tokenizer_path = gr.Textbox(label="Tokenizer Path", value=defaults["tokenizer_path"])
-                dtype_name = gr.Dropdown(label="DType", choices=["bf16", "fp16", "fp32"], value=defaults["dtype_name"])
-                gate_type = gr.Dropdown(
-                    label="Gate Type",
-                    choices=["headwise", "elementwise", "none"],
-                    value=defaults["gate_type"],
+                gr.Markdown(
+                    "\n".join(
+                        [
+                            f"`model`: {defaults['model_path']}",
+                            f"`vae`: {defaults['vae_path']}",
+                            f"`text_encoder`: {defaults['text_encoder_path']}",
+                            f"`tokenizer`: {defaults['tokenizer_path']}",
+                            f"`dtype`: {defaults['dtype_name']}",
+                            f"`gate_type`: {defaults['gate_type']}",
+                            f"`gate_layers`: {defaults['gate_layers'] or 'default'}",
+                        ]
+                    )
                 )
-                gate_layers = gr.Textbox(label="Gate Layers", value=defaults["gate_layers"])
-                gate_layers_noise_refiner = gr.Textbox(
-                    label="Gate Layers Noise Refiner", value=defaults["gate_layers_noise_refiner"]
-                )
-                gate_layers_context_refiner = gr.Textbox(
-                    label="Gate Layers Context Refiner", value=defaults["gate_layers_context_refiner"]
-                )
-                max_token_length = gr.Slider(label="Max Token Length", minimum=64, maximum=1024, step=64, value=512)
-                disable_chat_template = gr.Checkbox(label="Disable Chat Template", value=False)
-
                 with gr.Row():
                     load_btn = gr.Button("Load Model", variant="primary")
                     unload_btn = gr.Button("Unload")
@@ -412,31 +385,17 @@ def build_demo(defaults):
                     width = gr.Slider(label="Width", minimum=256, maximum=2048, step=16, value=1024)
                     height = gr.Slider(label="Height", minimum=256, maximum=2048, step=16, value=1024)
                 with gr.Row():
-                    seed = gr.Number(label="Seed", value=1, precision=0)
+                    seed = gr.Number(label="Seed (-1 for random)", value=-1, precision=0)
                     discrete_flow_shift = gr.Slider(label="Flow Shift", minimum=0.5, maximum=5.0, step=0.1, value=3.0)
                 generate_btn = gr.Button("Generate", variant="primary")
                 gallery = gr.Gallery(label="Images", columns=2, preview=True, height="auto")
                 status = gr.Textbox(label="Status", lines=6, interactive=False)
 
-        load_inputs = [
-            model_path,
-            vae_path,
-            text_encoder_path,
-            tokenizer_path,
-            dtype_name,
-            gate_type,
-            gate_layers,
-            gate_layers_noise_refiner,
-            gate_layers_context_refiner,
-            max_token_length,
-            disable_chat_template,
-        ]
-        load_btn.click(load_model, inputs=load_inputs, outputs=status)
+        load_btn.click(load_model, outputs=status)
         unload_btn.click(unload_model, outputs=status)
         generate_btn.click(
             generate,
-            inputs=load_inputs
-            + [
+            inputs=[
                 prompt,
                 negative_prompt,
                 guidance_scale,
@@ -481,6 +440,8 @@ def main():
             "gate_layers": args.gate_layers,
             "gate_layers_noise_refiner": args.gate_layers_noise_refiner,
             "gate_layers_context_refiner": args.gate_layers_context_refiner,
+            "max_token_length": 512,
+            "disable_chat_template": False,
         }
     )
     demo.queue().launch(server_name=args.server_name, server_port=args.server_port, share=args.share)
