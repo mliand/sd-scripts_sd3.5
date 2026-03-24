@@ -130,12 +130,12 @@ class ModelManager:
                 self.device,
                 gate_type=gate_type,
             )
+            if gate_layers_noise_tuple is not None or gate_layers_context_tuple is not None:
+                logger.warning("Refiner gate layer options are ignored: gated attention is only applied to main transformer layers.")
             if any(v is not None for v in (gate_layers_tuple, gate_layers_noise_tuple, gate_layers_context_tuple)):
                 if hasattr(self.transformer, "set_gate_layers"):
                     self.transformer.set_gate_layers(
                         layer_ids=list(gate_layers_tuple) if gate_layers_tuple is not None else None,
-                        noise_refiner_ids=list(gate_layers_noise_tuple) if gate_layers_noise_tuple is not None else None,
-                        context_refiner_ids=list(gate_layers_context_tuple) if gate_layers_context_tuple is not None else None,
                     )
 
             self.vae = zimage_utils.load_vae(vae_path, dtype, self.device)
@@ -438,8 +438,18 @@ def main():
     parser.add_argument("--tokenizer", type=str, default="/data/models/Z-Image/tokenizer")
     parser.add_argument("--gate_type", type=str, default="elementwise", choices=["headwise", "elementwise", "none"])
     parser.add_argument("--gate_layers", type=str, default="1-22")
-    parser.add_argument("--gate_layers_noise_refiner", type=str, default="")
-    parser.add_argument("--gate_layers_context_refiner", type=str, default="")
+    parser.add_argument(
+        "--gate_layers_noise_refiner",
+        type=str,
+        default="",
+        help="Deprecated and ignored. Gated attention is only applied to main transformer layers.",
+    )
+    parser.add_argument(
+        "--gate_layers_context_refiner",
+        type=str,
+        default="",
+        help="Deprecated and ignored. Gated attention is only applied to main transformer layers.",
+    )
     parser.add_argument("--dtype", type=str, default="bf16", choices=["bf16", "fp16", "fp32"])
     parser.add_argument("--server_name", type=str, default="0.0.0.0")
     parser.add_argument("--server_port", type=int, default=7860)

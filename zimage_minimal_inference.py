@@ -164,13 +164,13 @@ def main():
         "--gate_layers_noise_refiner",
         type=str,
         default=None,
-        help="Layer indices to enable gated attention in noise refiner. Accepts commas/spaces/ranges, e.g. '0-1 3'",
+        help="Deprecated and ignored. Gated attention is only applied to main transformer layers.",
     )
     parser.add_argument(
         "--gate_layers_context_refiner",
         type=str,
         default=None,
-        help="Layer indices to enable gated attention in context refiner. Accepts commas/spaces/ranges, e.g. '0 2-3'",
+        help="Deprecated and ignored. Gated attention is only applied to main transformer layers.",
     )
     args = parser.parse_args()
 
@@ -219,14 +219,15 @@ def main():
     args.gate_layers_noise_refiner = _normalize_gate_layers(args.gate_layers_noise_refiner)
     args.gate_layers_context_refiner = _normalize_gate_layers(args.gate_layers_context_refiner)
 
+    if args.gate_layers_noise_refiner is not None or args.gate_layers_context_refiner is not None:
+        logger.warning("Refiner gate layer options are ignored: gated attention is only applied to main transformer layers.")
+
     if any(
         v is not None
         for v in (args.gate_layers, args.gate_layers_noise_refiner, args.gate_layers_context_refiner)
     ) and hasattr(transformer, "set_gate_layers"):
         transformer.set_gate_layers(
             layer_ids=args.gate_layers,
-            noise_refiner_ids=args.gate_layers_noise_refiner,
-            context_refiner_ids=args.gate_layers_context_refiner,
         )
     vae = zimage_utils.load_vae(args.vae, dtype, device)
     text_encoder = zimage_utils.load_text_encoder(args.text_encoder, dtype, device)

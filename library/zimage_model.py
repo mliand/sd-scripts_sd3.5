@@ -541,7 +541,6 @@ class ZImageTransformer2DModel(nn.Module):
                     qk_norm,
                     modulation=True,
                     use_16bit=use_16bit_for_attention,
-                    gate_type=gate_type,
                 )
                 for layer_id in range(n_refiner_layers)
             ]
@@ -558,7 +557,6 @@ class ZImageTransformer2DModel(nn.Module):
                     qk_norm,
                     modulation=False,
                     use_16bit=use_16bit_for_attention,
-                    gate_type=gate_type,
                 )
                 for layer_id in range(n_refiner_layers)
             ]
@@ -654,8 +652,8 @@ class ZImageTransformer2DModel(nn.Module):
                     block.set_gate_enabled(idx in enabled)
 
         apply(self.layers, layer_ids)
-        apply(self.noise_refiner, noise_refiner_ids)
-        apply(self.context_refiner, context_refiner_ids)
+        if noise_refiner_ids is not None or context_refiner_ids is not None:
+            logger.warning("Refiner gate layer masks are ignored: gated attention is only applied to main transformer layers.")
 
     def get_gate_statistics(self) -> Dict[str, float]:
         stats: Dict[str, float] = {}
