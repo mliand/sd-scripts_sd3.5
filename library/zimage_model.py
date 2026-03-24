@@ -1048,9 +1048,8 @@ def _expand_state_dict_for_gating(
     dim: int,
 ) -> Dict[str, torch.Tensor]:
     if gate_type == "none":
-        return state_dict
-
-    if gate_type == "headwise":
+        gate_dim = 0
+    elif gate_type == "headwise":
         gate_dim = n_heads
     elif gate_type == "elementwise":
         gate_dim = dim
@@ -1058,33 +1057,44 @@ def _expand_state_dict_for_gating(
         raise ValueError(f"Unsupported gate_type: {gate_type}")
 
     base_out = dim
-    expected_out = dim + gate_dim
     new_sd: Dict[str, torch.Tensor] = {}
+
+    def expected_out_features(key: str) -> int:
+        # Gated attention is only used in the main transformer layers.
+        return dim + gate_dim if gate_dim > 0 and key.startswith("layers.") else dim
 
     for key, value in state_dict.items():
         if ".attention.to_q.weight" in key:
+            expected_out = expected_out_features(key)
             if value.shape[0] == expected_out:
                 new_sd[key] = value
-            elif value.shape[0] == base_out:
+            elif value.shape[0] == base_out and expected_out > base_out:
                 new_weight = torch.zeros((expected_out, value.shape[1]), dtype=value.dtype, device=value.device)
                 new_weight[:base_out] = value
                 new_sd[key] = new_weight
+            elif value.shape[0] > expected_out and value.shape[1] == dim:
+                logger.info(f"Trim extra gated to_q rows for {key}: {value.shape[0]} -> {expected_out}")
+                new_sd[key] = value[:expected_out]
             else:
                 raise ValueError(
                     f"Unexpected to_q.weight shape for {key}: {tuple(value.shape)} "
-                    f"(expected {base_out} or {expected_out} rows)"
+                    f"(expected {expected_out} rows, base {base_out})"
                 )
         elif ".attention.to_q.bias" in key:
+            expected_out = expected_out_features(key)
             if value.shape[0] == expected_out:
                 new_sd[key] = value
-            elif value.shape[0] == base_out:
+            elif value.shape[0] == base_out and expected_out > base_out:
                 new_bias = torch.zeros(expected_out, dtype=value.dtype, device=value.device)
                 new_bias[:base_out] = value
                 new_sd[key] = new_bias
+            elif value.shape[0] > expected_out:
+                logger.info(f"Trim extra gated to_q bias rows for {key}: {value.shape[0]} -> {expected_out}")
+                new_sd[key] = value[:expected_out]
             else:
                 raise ValueError(
                     f"Unexpected to_q.bias shape for {key}: {tuple(value.shape)} "
-                    f"(expected {base_out} or {expected_out})"
+                    f"(expected {expected_out}, base {base_out})"
                 )
         else:
             new_sd[key] = value
