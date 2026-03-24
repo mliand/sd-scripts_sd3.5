@@ -50,6 +50,8 @@ def train(args: argparse.Namespace):
     train_util.prepare_dataset_args(args, True)
     deepspeed_utils.prepare_deepspeed_args(args)
     setup_logging(args, reset=True)
+    if args.log_gate_stats_interval <= 0:
+        raise ValueError("--log_gate_stats_interval must be greater than 0.")
 
     if args.pretrained_model_name_or_path is None:
         raise ValueError("--pretrained_model_name_or_path is required for Z-Image training.")
@@ -277,10 +279,10 @@ def train(args: argparse.Namespace):
         logger.info("Applied gated attention layer mask.")
     if args.gradient_checkpointing:
         transformer.enable_gradient_checkpointing()
+    transformer.requires_grad_(True)
     if args.freeze_gate and hasattr(transformer, "set_gate_trainable"):
         transformer.set_gate_trainable(False)
         logger.info("Gate parameters are frozen (no updates).")
-    transformer.requires_grad_(True)
     transformer.train()
 
     params_to_optimize = [{"params": list(transformer.parameters()), "lr": args.learning_rate}]
@@ -460,6 +462,10 @@ def train(args: argparse.Namespace):
                     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
 
                 optimizer.step()
+                if args.freeze_gate:
+                    unwrapped_transformer = accelerator.unwrap_model(transformer)
+                    if hasattr(unwrapped_transformer, "restore_frozen_gates"):
+                        unwrapped_transformer.restore_frozen_gates()
                 lr_scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
 
@@ -507,11 +513,12 @@ def train(args: argparse.Namespace):
                             for key, value in gate_stats.items():
                                 if key not in ["gate_mean_overall", "gate_sparsity_overall"]:
                                     logs[f"gate/{key}"] = value
-
-                    if hasattr(unwrapped_transformer, "set_log_gate_stats"):
-                        unwrapped_transformer.set_log_gate_stats(False)
-
                 accelerator.log(logs, step=global_step)
+
+            if should_log_gate_stats:
+                unwrapped_transformer = accelerator.unwrap_model(transformer)
+                if hasattr(unwrapped_transformer, "set_log_gate_stats"):
+                    unwrapped_transformer.set_log_gate_stats(False)
 
             loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
             avr_loss: float = loss_recorder.moving_average

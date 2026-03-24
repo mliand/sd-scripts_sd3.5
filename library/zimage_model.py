@@ -187,6 +187,7 @@ class ZImageAttention(nn.Module):
         self._log_gate_stats = False
         self._last_gate_stats = None
         self._gate_grad_hook = None
+        self._frozen_gate_weight = None
 
     def enable_gradient_checkpointing(self):
         self.gradient_checkpointing = True
@@ -205,15 +206,15 @@ class ZImageAttention(nn.Module):
     def set_gate_trainable(self, enabled: bool):
         if self.gate_dim == 0:
             return
+        gate_rows = slice(self.n_heads * self.head_dim, self.n_heads * self.head_dim + self.gate_dim)
         if enabled:
             if self._gate_grad_hook is not None:
                 self._gate_grad_hook.remove()
                 self._gate_grad_hook = None
+            self._frozen_gate_weight = None
             return
 
         if self._gate_grad_hook is None:
-            gate_rows = slice(self.n_heads * self.head_dim, self.n_heads * self.head_dim + self.gate_dim)
-
             def _gate_grad_hook(grad):
                 if grad is None:
                     return grad
@@ -222,6 +223,14 @@ class ZImageAttention(nn.Module):
                 return grad
 
             self._gate_grad_hook = self.to_q.weight.register_hook(_gate_grad_hook)
+        self._frozen_gate_weight = self.to_q.weight.data[gate_rows].detach().clone()
+
+    def restore_frozen_gate(self):
+        if self.gate_dim == 0 or self._frozen_gate_weight is None:
+            return
+        gate_rows = slice(self.n_heads * self.head_dim, self.n_heads * self.head_dim + self.gate_dim)
+        with torch.no_grad():
+            self.to_q.weight.data[gate_rows].copy_(self._frozen_gate_weight)
 
     def get_gate_statistics(self) -> Dict[str, float]:
         return self._last_gate_stats or {}
@@ -371,6 +380,10 @@ class ZImageTransformerBlock(nn.Module):
         if hasattr(self.attention, "get_gate_statistics"):
             return self.attention.get_gate_statistics()
         return {}
+
+    def restore_frozen_gate(self):
+        if hasattr(self.attention, "restore_frozen_gate"):
+            self.attention.restore_frozen_gate()
 
     def _forward(
         self,
@@ -672,6 +685,11 @@ class ZImageTransformer2DModel(nn.Module):
             stats["gate_sparsity_overall"] = sum(gate_sparsities) / len(gate_sparsities)
 
         return stats
+
+    def restore_frozen_gates(self):
+        for block in self.noise_refiner + self.context_refiner + self.layers:
+            if hasattr(block, "restore_frozen_gate"):
+                block.restore_frozen_gate()
 
     def enable_block_swap(self, num_blocks: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False):
         self.blocks_to_swap = num_blocks
