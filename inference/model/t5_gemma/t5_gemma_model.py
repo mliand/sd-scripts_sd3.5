@@ -17,7 +17,8 @@ class T5GemmaEncoder:
         model = T5GemmaEncoderModel.from_pretrained(
             model_path,
             is_encoder_decoder=False,
-            dtype=weight_dtype,
+            torch_dtype=weight_dtype,
+            attn_implementation="eager",
         ).to(device)
         self.model = CPUOffloadWrapper(model, is_cpu_offload=env_is_true("CPU_OFFLOAD") or get_arch_memory() <= 48)
 
