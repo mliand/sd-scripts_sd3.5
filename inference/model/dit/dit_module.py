@@ -941,8 +941,12 @@ class DiTModel(torch.nn.Module):
         x_audio = self.final_norm_audio(x_audio)
         x_audio = self.final_linear_audio(x_audio)
 
+        out_dtype = x_video.dtype if x_video.numel() > 0 else x_audio.dtype
         x_out = torch.zeros(
-            x.shape[0], max(self.config.video_in_channels, self.config.audio_in_channels), device=x.device, dtype=x.dtype
+            x.shape[0],
+            max(self.config.video_in_channels, self.config.audio_in_channels),
+            device=x.device,
+            dtype=out_dtype,
         )
         x_out[video_mask, : self.config.video_in_channels] = x_video
         x_out[audio_mask, : self.config.audio_in_channels] = x_audio
