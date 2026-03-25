@@ -311,11 +311,17 @@ def generate_video(
     do_cfg = max(float(args.guidance_scale), audio_cfg_scale, float(args.low_t_video_guidance)) > 1.0
 
     if do_cfg:
-        neg_embeds, neg_len = ctx.get_padded_t5_gemma_embedding(
-            args.negative_prompt, args.txt_model_path, str(ctx.device), ctx.model_dtype, ctx.target_length
-        )
-        neg_embeds = neg_embeds.to(device=ctx.device, dtype=ctx.model_dtype).contiguous()
-        neg_len = int(neg_len)
+        if args.negative_prompt.strip():
+            neg_embeds, neg_len = ctx.get_padded_t5_gemma_embedding(
+                args.negative_prompt, args.txt_model_path, str(ctx.device), ctx.model_dtype, ctx.target_length
+            )
+            neg_embeds = neg_embeds.to(device=ctx.device, dtype=ctx.model_dtype).contiguous()
+            neg_len = int(neg_len)
+        else:
+            # Avoid T5-Gemma empty-string masking edge cases by treating empty negative prompts
+            # as unconditional generation with zero text tokens.
+            neg_embeds = torch.zeros_like(prompt_embeds)
+            neg_len = 0
     else:
         neg_embeds = None
         neg_len = 0

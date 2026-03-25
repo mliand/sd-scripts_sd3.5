@@ -612,7 +612,7 @@ def get_cp_world_size():
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         return torch.distributed.get_world_size(group=get_cp_group())
     else:
-        return 0
+        return 1
 
 
 def get_cp_rank():
