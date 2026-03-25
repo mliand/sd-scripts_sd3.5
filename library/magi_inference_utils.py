@@ -8,6 +8,8 @@ from typing import List, Optional, Tuple
 import imageio
 import soundfile as sf
 import torch
+from diffusers.utils import load_image
+from diffusers.video_processor import VideoProcessor
 from safetensors.torch import load_file
 from tqdm import tqdm
 
@@ -52,6 +54,7 @@ def add_common_inference_arguments(parser: argparse.ArgumentParser) -> argparse.
 
     parser.add_argument("--prompt", type=str, required=True)
     parser.add_argument("--negative_prompt", type=str, default="")
+    parser.add_argument("--image_path", type=str, default=None, help="Optional reference image path used as the first frame.")
     parser.add_argument("--guidance_scale", type=float, default=5.0)
     parser.add_argument(
         "--audio_guidance_scale",
@@ -184,6 +187,20 @@ def _build_latent_shape(model_cfg, data_proxy_cfg, width: int, height: int, num_
         latent_t = max(patch_t, (latent_t // patch_t) * patch_t)
 
     return (1, z_channels, latent_t, latent_h, latent_w)
+
+
+def _encode_image_latent(ctx: MagiInferenceContext, image_path: str, latent_shape: Tuple[int, int, int, int, int]) -> torch.Tensor:
+    from inference.pipeline.video_process import resizecrop
+
+    _, _, _, latent_h, latent_w = latent_shape
+    image = load_image(image_path)
+    target_height = int(latent_h * 16)
+    target_width = int(latent_w * 16)
+    image = resizecrop(image, target_height, target_width)
+    image = VideoProcessor(vae_scale_factor=16).preprocess(image, height=target_height, width=target_width)
+    image = image.to(device=ctx.device, dtype=ctx.decode_dtype).unsqueeze(2)
+    image_latent = ctx.vae.encode(image).to(torch.float32)
+    return image_latent
 
 
 def _model_forward(
@@ -335,6 +352,7 @@ def generate_video(
         dtype=torch.float32,
         generator=generator,
     )
+    latent_image = _encode_image_latent(ctx, args.image_path, latent_shape) if args.image_path else None
 
     video_scheduler = FlowUniPCMultistepScheduler()
     audio_scheduler = FlowUniPCMultistepScheduler()
@@ -343,6 +361,9 @@ def generate_video(
     timesteps = video_scheduler.timesteps
     logger.info(f"Start inference: steps={len(timesteps)}, latent_shape={tuple(latent_video.shape)}, cfg={args.guidance_scale}")
     for t in tqdm(timesteps, desc="magi_infer"):
+        if latent_image is not None:
+            latent_video[:, :, :1] = latent_image[:, :, :1]
+
         noisy_video = latent_video.to(dtype=ctx.model_dtype)
         noisy_audio = latent_audio.to(dtype=ctx.model_dtype)
         pred_cond_video, pred_cond_audio = _model_forward(
@@ -371,6 +392,9 @@ def generate_video(
 
         latent_video = video_scheduler.step(pred_video.to(torch.float32), t, latent_video, return_dict=False)[0]
         latent_audio = audio_scheduler.step(pred_audio.to(torch.float32), t, latent_audio, return_dict=False)[0]
+
+    if latent_image is not None:
+        latent_video[:, :, :1] = latent_image[:, :, :1]
 
     frames = _decode_video_latent(ctx.vae, latent_video, ctx.decode_dtype)
     out_path = _make_output_path(args.output_dir, args.output_name)
