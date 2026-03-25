@@ -388,28 +388,16 @@ HAS_MAGI_ATTENTION = importlib.util.find_spec("magi_attention") is not None
 HAS_FA3 = importlib.util.find_spec("flash_attn_interface") is not None
 
 
-def _native_flash_attn_func(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
-    # Input/output layout stays aligned with flash-attn: [B, S, H, D].
-    q = query.permute(0, 2, 1, 3)
-    k = key.permute(0, 2, 1, 3)
-    v = value.permute(0, 2, 1, 3)
-    out = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=False)
-    return out.permute(0, 2, 1, 3).contiguous()
-
-
 @magi_register_custom_op(name="infra::flash_attn_func", is_subgraph_boundary=True)
 def flash_attn_func(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
-    try:
-        if HAS_FA3 and is_hopper_arch():
-            from flash_attn_interface import flash_attn_func as fa3_flash_attn_func
+    if HAS_FA3 and is_hopper_arch():
+        from flash_attn_interface import flash_attn_func as fa3_flash_attn_func
 
-            return fa3_flash_attn_func(query, key, value)
-        else:
-            from flash_attn.flash_attn_interface import flash_attn_func as fa2_flash_attn_func
+        return fa3_flash_attn_func(query, key, value)
+    else:
+        from flash_attn.flash_attn_interface import flash_attn_func as fa2_flash_attn_func
 
-            return fa2_flash_attn_func(query, key, value)
-    except (ImportError, ModuleNotFoundError):
-        return _native_flash_attn_func(query, key, value)
+        return fa2_flash_attn_func(query, key, value)
 
 
 def _split_q_range_with_no_overlap(
@@ -527,10 +515,7 @@ def flash_attn_with_cp(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, cp_spl
         k = k.unsqueeze(0)
         v = v.unsqueeze(0)
 
-    if hasattr(torch.ops.infra, "flash_attn_func"):
-        self_attn_out = torch.ops.infra.flash_attn_func(q, k, v).squeeze(0)
-    else:
-        self_attn_out = flash_attn_func(q, k, v).squeeze(0)
+    self_attn_out = torch.ops.infra.flash_attn_func(q, k, v).squeeze(0)
 
     if get_cp_world_size() > 1:
         self_attn_out = scatter_seqlen_gather_head(self_attn_out, cp_split_sizes, get_cp_group(), async_op=False)
@@ -561,10 +546,7 @@ def flex_flash_attn_with_cp(
     if get_cp_world_size() > 1:
         q, k, v = batch_scatter_head_gather_seqlen([q, k, v], cp_split_sizes, get_cp_group())
 
-    if hasattr(torch.ops.infra, "flex_flash_attn_func"):
-        out, _ = torch.ops.infra.flex_flash_attn_func(q, k, v, q_ranges=q_ranges, k_ranges=k_ranges)
-    else:
-        out, _ = flex_flash_attn_func(q, k, v, q_ranges=q_ranges, k_ranges=k_ranges)
+    out, _ = torch.ops.infra.flex_flash_attn_func(q, k, v, q_ranges=q_ranges, k_ranges=k_ranges)
 
     if get_cp_world_size() > 1:
         out = scatter_seqlen_gather_head(out, cp_split_sizes, get_cp_group(), async_op=False)
