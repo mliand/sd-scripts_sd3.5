@@ -65,6 +65,10 @@ class UlyssesScheduler(Generic[T]):
         """
         seq_len = x.shape[0]
         cp_world_size = get_cp_world_size()
+        if cp_world_size <= 1:
+            self._cp_split_sizes = [seq_len]
+            return x
+
         if seq_len % cp_world_size == 0:
             cp_split_sizes = [seq_len // cp_world_size] * cp_world_size
         else:
@@ -95,6 +99,9 @@ class UlyssesScheduler(Generic[T]):
         Returns:
             Reconstructed tensor with the original sequence length.
         """
+        if self._cp_split_sizes is None or len(self._cp_split_sizes) <= 1:
+            return x
+
         x = gather_from_context_parallel_region(x, self._cp_split_sizes, group=get_cp_group())
         return x
 
