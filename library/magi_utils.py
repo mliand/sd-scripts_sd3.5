@@ -1,3 +1,4 @@
+import importlib.machinery
 import importlib.util
 import json
 import os
@@ -36,12 +37,27 @@ def _str_to_torch_dtype(dtype: Optional[str], default: torch.dtype = torch.bfloa
 
 
 def ensure_magi_compiler_stub() -> None:
-    if importlib.util.find_spec("magi_compiler") is not None:
+    existing = sys.modules.get("magi_compiler")
+    if existing is not None and getattr(existing, "__spec__", None) is None:
+        sys.modules.pop("magi_compiler", None)
+        sys.modules.pop("magi_compiler.api", None)
+        sys.modules.pop("magi_compiler.config", None)
+
+    try:
+        spec = importlib.util.find_spec("magi_compiler")
+    except ValueError:
+        sys.modules.pop("magi_compiler", None)
+        sys.modules.pop("magi_compiler.api", None)
+        sys.modules.pop("magi_compiler.config", None)
+        spec = None
+
+    if spec is not None:
         return
 
     logger.warning("magi_compiler not found, installing runtime no-op stub.")
 
     magi_compiler_mod = types.ModuleType("magi_compiler")
+    magi_compiler_mod.__spec__ = importlib.machinery.ModuleSpec("magi_compiler", loader=None)
 
     def magi_compile(*args, **kwargs):
         def decorator(obj):
@@ -52,6 +68,7 @@ def ensure_magi_compiler_stub() -> None:
     magi_compiler_mod.magi_compile = magi_compile
 
     api_mod = types.ModuleType("magi_compiler.api")
+    api_mod.__spec__ = importlib.machinery.ModuleSpec("magi_compiler.api", loader=None)
 
     def magi_register_custom_op(*args, **kwargs):
         def decorator(fn):
@@ -62,6 +79,7 @@ def ensure_magi_compiler_stub() -> None:
     api_mod.magi_register_custom_op = magi_register_custom_op
 
     config_mod = types.ModuleType("magi_compiler.config")
+    config_mod.__spec__ = importlib.machinery.ModuleSpec("magi_compiler.config", loader=None)
 
     @dataclass
     class _OffloadConfig:
