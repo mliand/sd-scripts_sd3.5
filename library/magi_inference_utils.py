@@ -407,9 +407,13 @@ def apply_lora_to_wrapper(wrapper: MagiModelWrapper, lora_specs: List[str], merg
 def generate_video(
     ctx: MagiInferenceContext,
     args: argparse.Namespace,
+    progress_callback=None,
 ):
     from inference.pipeline.video_process import merge_video_and_audio
     from inference.pipeline.scheduler_unipc import FlowUniPCMultistepScheduler
+
+    if progress_callback is not None:
+        progress_callback(0, 1, "Encoding prompt")
 
     prompt_embeds, prompt_len = _get_text_embeddings(
         ctx,
@@ -423,6 +427,8 @@ def generate_video(
 
     if do_cfg:
         if args.negative_prompt.strip():
+            if progress_callback is not None:
+                progress_callback(0, 1, "Encoding negative prompt")
             neg_embeds, neg_len = _get_text_embeddings(
                 ctx,
                 args.negative_prompt,
@@ -448,6 +454,8 @@ def generate_video(
         generator=generator,
     )
     if args.image_path:
+        if progress_callback is not None:
+            progress_callback(0, 1, "Encoding first frame")
         if args.offload_vae:
             _move_module(ctx.vae, ctx.device, ctx.decode_dtype)
         latent_image = _encode_image_latent(ctx, args.image_path, latent_shape)
@@ -461,7 +469,10 @@ def generate_video(
     audio_scheduler.set_timesteps(int(args.num_inference_steps), device=ctx.device, shift=float(args.discrete_flow_shift))
     timesteps = video_scheduler.timesteps
     logger.info(f"Start inference: steps={len(timesteps)}, latent_shape={tuple(latent_video.shape)}, cfg={args.guidance_scale}")
-    for t in tqdm(timesteps, desc="magi_infer"):
+    total_steps = len(timesteps)
+    for step_idx, t in enumerate(tqdm(timesteps, desc="magi_infer", disable=progress_callback is not None), start=1):
+        if progress_callback is not None:
+            progress_callback(step_idx, total_steps, f"Sampling {step_idx}/{total_steps}")
         if latent_image is not None:
             latent_video[:, :, :1] = latent_image[:, :, :1]
 
@@ -497,6 +508,8 @@ def generate_video(
     if latent_image is not None:
         latent_video[:, :, :1] = latent_image[:, :, :1]
 
+    if progress_callback is not None:
+        progress_callback(0, 1, "Decoding video")
     if args.offload_vae:
         _move_module(ctx.vae, ctx.device, ctx.decode_dtype)
     frames = _decode_video_latent(ctx.vae, latent_video, ctx.decode_dtype)
@@ -509,6 +522,8 @@ def generate_video(
         return out_path
 
     # Native style: decode audio latents then mux with video.
+    if progress_callback is not None:
+        progress_callback(0, 1, "Decoding audio")
     if args.offload_audio_vae:
         _move_audio_vae(ctx.audio_vae, ctx.device)
     audio_np = _decode_audio_latent(ctx.audio_vae, latent_audio)
@@ -518,6 +533,8 @@ def generate_video(
     tmp_audio = os.path.join(args.output_dir, f".{args.output_name}_{tmp_tag}.audio.wav")
 
     try:
+        if progress_callback is not None:
+            progress_callback(0, 1, "Muxing output")
         _write_video_mp4(frames, tmp_video, int(args.fps))
         sf.write(tmp_audio, audio_np, ctx.audio_vae.sample_rate)
         merge_video_and_audio(tmp_video, tmp_audio, out_path)

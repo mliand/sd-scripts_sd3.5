@@ -1,4 +1,6 @@
 import argparse
+import contextlib
+import io
 import os
 import random
 import tempfile
@@ -160,7 +162,7 @@ def build_demo(defaults: dict, manager: DavincManager):
         height: int,
         num_frames: int,
         seed: int,
-        progress=gr.Progress(track_tqdm=True),
+        progress=gr.Progress(),
     ):
         if prompt is None or prompt.strip() == "":
             raise gr.Error("Prompt 不能为空。")
@@ -210,9 +212,15 @@ def build_demo(defaults: dict, manager: DavincManager):
                 offload_audio_vae=True,
             )
 
+            def _progress(step: int, total: int, desc: str):
+                ratio = 0.0 if total <= 0 else min(max(float(step) / float(total), 0.0), 1.0)
+                progress(ratio, desc=desc)
+
             progress(0, desc="开始推理")
             with manager.lock:
-                video_path = generate_video(manager.ctx, args)
+                # Suppress tqdm / interpreter progress noise from backend libs in the Gradio UI.
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    video_path = generate_video(manager.ctx, args, progress_callback=_progress)
 
             return video_path
         except gr.Error:
@@ -231,9 +239,12 @@ def build_demo(defaults: dict, manager: DavincManager):
         with gr.Row(elem_classes=["davinc-card"]):
             with gr.Column(scale=1):
                 with gr.Row():
-                    prompt = gr.Textbox(label="Prompt", lines=10, placeholder="描述动作、人物、镜头语言")
-                    negative_prompt = gr.Textbox(label="Negative Prompt", lines=10, placeholder="不希望出现的内容")
-                    first_frame = gr.Image(label="First Frame", type="pil", height=260)
+                    with gr.Column(scale=3):
+                        prompt = gr.Textbox(label="Prompt", lines=10, placeholder="描述动作、人物、镜头语言")
+                    with gr.Column(scale=3):
+                        negative_prompt = gr.Textbox(label="Negative Prompt", lines=10, placeholder="不希望出现的内容")
+                    with gr.Column(scale=4):
+                        first_frame = gr.Image(label="First Frame", type="pil", height=360)
                 with gr.Row():
                     width = gr.Slider(label="Width", minimum=MIN_SIDE, maximum=MAX_SIDE, step=SIDE_STEP, value=480)
                     height = gr.Slider(label="Height", minimum=MIN_SIDE, maximum=MAX_SIDE, step=SIDE_STEP, value=272)
