@@ -105,11 +105,9 @@ class DavincManager:
             return "模型加载完成。"
 
 
-def build_demo(defaults: dict):
-    manager = DavincManager()
+def build_demo(defaults: dict, manager: DavincManager):
     output_dir = Path(defaults["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
-    initial_status = "模型加载中..."
 
     theme = gr.themes.Soft(
         primary_hue="blue",
@@ -216,15 +214,7 @@ def build_demo(defaults: dict):
             with manager.lock:
                 video_path = generate_video(manager.ctx, args)
 
-            status = (
-                f"{load_message}\n"
-                f"推理完成\n"
-                f"Seed: {seed}\n"
-                f"Resolution: {width}x{height}\n"
-                f"Frames: {num_frames}\n"
-                f"CPU offload: {'on' if defaults['cpu_offload'] else 'off'}"
-            )
-            return video_path, status
+            return video_path
         except gr.Error:
             raise
         except Exception as e:
@@ -238,13 +228,6 @@ def build_demo(defaults: dict):
                     pass
 
     with gr.Blocks(title="daVinci Inference", theme=theme, css=css) as demo:
-        gr.Markdown(
-            """
-            # daVinci 推理
-            蓝白主题的最小推理界面，请求串行排队，避免多任务把显存打满。
-            """
-        )
-
         with gr.Row(elem_classes=["davinc-card"]):
             with gr.Column(scale=1):
                 with gr.Row():
@@ -259,7 +242,6 @@ def build_demo(defaults: dict):
                     seed = gr.Number(label="Seed (-1 随机)", value=-1, precision=0)
                 generate_btn = gr.Button("生成视频", variant="primary")
                 video = gr.Video(label="Output Video", interactive=False)
-                status = gr.Textbox(label="状态", lines=5, interactive=False, value=initial_status)
 
         generate_btn.click(
             generate,
@@ -272,10 +254,8 @@ def build_demo(defaults: dict):
                 num_frames,
                 seed,
             ],
-            outputs=[video, status],
+            outputs=video,
         )
-
-        demo.load(load_model, outputs=status)
 
     return demo
 
@@ -297,6 +277,24 @@ def main():
     parser.add_argument("--share", action="store_true")
     args = parser.parse_args()
 
+    manager = DavincManager()
+    preload_config = LoadedConfig(
+        pretrained_model_name_or_path=args.pretrained_model_name_or_path,
+        config_load_path=args.config_load_path,
+        vae_model_path=args.vae_model_path,
+        audio_model_path=args.audio_model_path,
+        txt_model_path=args.txt_model_path,
+        device=args.device,
+        model_dtype=args.model_dtype,
+        decode_dtype=args.decode_dtype,
+        cpu_offload=bool(args.cpu_offload),
+        offload_text_encoder=True,
+        offload_vae=True,
+        offload_audio_vae=True,
+    )
+    os.environ["CPU_OFFLOAD"] = "1" if args.cpu_offload else "0"
+    manager.ensure_loaded(preload_config)
+
     demo = build_demo(
         {
             "pretrained_model_name_or_path": args.pretrained_model_name_or_path,
@@ -309,7 +307,8 @@ def main():
             "decode_dtype": args.decode_dtype,
             "cpu_offload": args.cpu_offload,
             "output_dir": args.output_dir,
-        }
+        },
+        manager,
     )
     demo.queue(default_concurrency_limit=1, max_size=8).launch(
         server_name=args.server_name,
