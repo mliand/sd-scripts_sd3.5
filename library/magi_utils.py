@@ -224,14 +224,30 @@ class MagiModelWrapper(torch.nn.Module):
         self.data_proxy = data_proxy
         self.audio_in_channels = audio_in_channels
 
-    def forward(self, noisy_video: torch.Tensor, text_embeds: torch.Tensor, text_lengths: Sequence[int]) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        noisy_video: torch.Tensor,
+        text_embeds: torch.Tensor,
+        text_lengths: Sequence[int],
+        noisy_audio: Optional[torch.Tensor] = None,
+        audio_lengths: Optional[Sequence[int]] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         bsz = noisy_video.shape[0]
-        audio_x_t = torch.zeros(
-            (bsz, 0, self.audio_in_channels),
-            device=noisy_video.device,
-            dtype=noisy_video.dtype,
-        )
-        audio_feat_len = [0] * bsz
+        if noisy_audio is None:
+            audio_x_t = torch.zeros(
+                (bsz, 0, self.audio_in_channels),
+                device=noisy_video.device,
+                dtype=noisy_video.dtype,
+            )
+            audio_feat_len = [0] * bsz
+        else:
+            if noisy_audio.ndim != 3:
+                raise ValueError(f"Expected noisy_audio shape [B, T, C], got {tuple(noisy_audio.shape)}")
+            audio_x_t = noisy_audio
+            if audio_lengths is None:
+                audio_feat_len = [int(noisy_audio.shape[1])] * bsz
+            else:
+                audio_feat_len = list(audio_lengths)
 
         packed = MagiTrainInput(
             x_t=noisy_video,
@@ -307,10 +323,15 @@ def default_te_cache_name(item_key: str) -> str:
     return f"{item_key}_magi_te.safetensors"
 
 
+def default_audio_cache_name(item_key: str) -> str:
+    return f"{item_key}_magi_audio.safetensors"
+
+
 __all__ = [
     "_str_to_torch_dtype",
     "MagiModelWrapper",
     "build_item_key",
+    "default_audio_cache_name",
     "default_latent_cache_name",
     "default_te_cache_name",
     "get_caption",

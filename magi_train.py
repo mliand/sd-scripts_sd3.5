@@ -37,6 +37,7 @@ LATENT_CACHE_KEY_PATTERN = re.compile(r"^latents_\d+x\d+x\d+_[a-zA-Z0-9]+$")
 class MagiCachedItem:
     latent_cache_path: str
     te_cache_path: str
+    audio_cache_path: str | None = None
 
 
 class MagiCachedDataset(Dataset):
@@ -44,6 +45,7 @@ class MagiCachedDataset(Dataset):
         self.manifest_path = manifest_path
         records = load_jsonl_records(manifest_path)
         self.items: List[MagiCachedItem] = []
+        audio_item_count = 0
 
         for rec in records:
             latent_cache = rec.get("magi_latent_cache")
@@ -56,10 +58,21 @@ class MagiCachedDataset(Dataset):
                 raise FileNotFoundError(f"latent cache not found: {latent_path}")
             if not os.path.isfile(te_path):
                 raise FileNotFoundError(f"text cache not found: {te_path}")
-            self.items.append(MagiCachedItem(latent_path, te_path))
+            audio_cache_path = None
+            audio_cache = rec.get("magi_audio_cache")
+            if audio_cache:
+                resolved_audio_path = resolve_data_path(manifest_path, str(audio_cache))
+                if not os.path.isfile(resolved_audio_path):
+                    raise FileNotFoundError(f"audio cache not found: {resolved_audio_path}")
+                audio_cache_path = resolved_audio_path
+                audio_item_count += 1
+            self.items.append(MagiCachedItem(latent_path, te_path, audio_cache_path))
 
         if len(self.items) == 0:
             raise ValueError("No valid items found in manifest. Ensure magi_latent_cache and magi_te_cache exist.")
+        if 0 < audio_item_count < len(self.items):
+            raise ValueError("Dataset mixes samples with and without magi_audio_cache. Please make the manifest consistent.")
+        self.has_audio = audio_item_count == len(self.items)
 
     def __len__(self) -> int:
         return len(self.items)
@@ -105,11 +118,22 @@ class MagiCachedDataset(Dataset):
         else:
             prompt_len = int(prompt_embeds.shape[0])
 
-        return {
+        sample = {
             "latents": latent_video,
             "prompt_embeds": prompt_embeds,
             "prompt_len": prompt_len,
         }
+        if item.audio_cache_path is not None:
+            audio_sd = load_file(item.audio_cache_path)
+            audio_latents = audio_sd["audio_latents"]
+            if audio_latents.ndim == 3:
+                audio_latents = audio_latents.squeeze(0)
+            if audio_latents.ndim != 2:
+                raise ValueError(f"Unexpected audio latent shape {tuple(audio_latents.shape)} in {item.audio_cache_path}")
+            audio_len = int(audio_sd["audio_len"].reshape(-1)[0].item()) if "audio_len" in audio_sd else int(audio_latents.shape[0])
+            sample["audio_latents"] = audio_latents.to(torch.float32).contiguous()
+            sample["audio_len"] = audio_len
+        return sample
 
 
 def _collate(batch: Sequence[dict]):
@@ -125,11 +149,42 @@ def _collate(batch: Sequence[dict]):
     prompt_embeds = torch.stack([x["prompt_embeds"] for x in batch], dim=0)
     prompt_len = torch.tensor([int(x["prompt_len"]) for x in batch], dtype=torch.int32)
 
-    return {
+    collated = {
         "latents": latents,
         "prompt_embeds": prompt_embeds,
         "prompt_len": prompt_len,
     }
+    has_audio = any("audio_latents" in x for x in batch)
+    if has_audio:
+        if not all("audio_latents" in x for x in batch):
+            raise ValueError("Mixed audio/non-audio samples in the same dataset are not supported.")
+        audio_lengths = [int(x["audio_len"]) for x in batch]
+        max_audio_len = max(audio_lengths)
+        audio_channels = int(batch[0]["audio_latents"].shape[-1])
+        audio_latents = torch.zeros((len(batch), max_audio_len, audio_channels), dtype=torch.float32)
+        for i, x in enumerate(batch):
+            cur = x["audio_latents"]
+            audio_latents[i, : cur.shape[0], :] = cur
+        collated["audio_latents"] = audio_latents
+        collated["audio_len"] = torch.tensor(audio_lengths, dtype=torch.int32)
+    return collated
+
+
+def _parse_train_audio_mode(mode: str) -> str:
+    value = str(mode).strip().lower()
+    if value not in {"auto", "always", "never"}:
+        raise ValueError(f"Unsupported --train_audio mode: {mode}")
+    return value
+
+
+def _resolve_audio_training(mode: str, dataset_has_audio: bool) -> bool:
+    if mode == "always":
+        if not dataset_has_audio:
+            raise ValueError("--train_audio=always but dataset manifest has no magi_audio_cache entries.")
+        return True
+    if mode == "never":
+        return False
+    return dataset_has_audio
 
 
 def _sample_sigmas(batch_size: int, device: torch.device, shift: float) -> torch.Tensor:
@@ -223,6 +278,7 @@ def train(args: argparse.Namespace) -> None:
         )
 
     dataset = MagiCachedDataset(args.dataset_jsonl)
+    use_audio_training = _resolve_audio_training(_parse_train_audio_mode(args.train_audio), dataset.has_audio)
     dataloader = DataLoader(
         dataset,
         batch_size=args.train_batch_size,
@@ -307,7 +363,8 @@ def train(args: argparse.Namespace) -> None:
     logger.info(
         "Start Magi training: "
         f"items={len(dataset)}, batches/epoch={len(dataloader)}, max_steps={args.max_train_steps}, "
-        f"batch_size={args.train_batch_size}, grad_accum={args.gradient_accumulation_steps}, deepspeed={args.deepspeed}"
+        f"batch_size={args.train_batch_size}, grad_accum={args.gradient_accumulation_steps}, deepspeed={args.deepspeed}, "
+        f"use_audio_training={use_audio_training}"
     )
 
     progress = tqdm(total=args.max_train_steps, desc="magi_train", disable=not accelerator.is_local_main_process)
@@ -324,15 +381,38 @@ def train(args: argparse.Namespace) -> None:
                 noise = torch.randn_like(latents)
                 sigmas = _sample_sigmas(latents.shape[0], latents.device, args.discrete_flow_shift).to(dtype=latents.dtype)
                 noisy = (1.0 - sigmas) * latents + sigmas * noise
+                noisy_audio = None
+                audio_lengths = None
+                audio_loss = None
+                if use_audio_training:
+                    audio_latents = batch["audio_latents"].to(device=accelerator.device, dtype=model_dtype)
+                    audio_lengths = batch["audio_len"].to(device=accelerator.device)
+                    audio_noise = torch.randn_like(audio_latents)
+                    audio_sigmas = sigmas.squeeze(-1).squeeze(-1)
+                    noisy_audio = (1.0 - audio_sigmas) * audio_latents + audio_sigmas * audio_noise
 
-                pred_video, _ = wrapper(
+                pred_video, pred_audio = wrapper(
                     noisy_video=noisy,
                     text_embeds=prompt_embeds,
                     text_lengths=[int(x) for x in prompt_len.tolist()],
+                    noisy_audio=noisy_audio,
+                    audio_lengths=None if audio_lengths is None else [int(x) for x in audio_lengths.tolist()],
                 )
 
-                target = noise - latents
-                loss = F.mse_loss(pred_video.float(), target.float(), reduction="mean")
+                target_video = noise - latents
+                video_loss = F.mse_loss(pred_video.float(), target_video.float(), reduction="mean")
+                loss = video_loss
+                if use_audio_training:
+                    target_audio = audio_noise - audio_latents
+                    audio_mask = (
+                        torch.arange(audio_latents.shape[1], device=audio_latents.device).unsqueeze(0)
+                        < audio_lengths.unsqueeze(1)
+                    ).unsqueeze(-1).to(pred_audio.dtype)
+                    pred_audio_masked = pred_audio * audio_mask
+                    target_audio_masked = target_audio * audio_mask
+                    denom = (audio_mask.sum() * pred_audio.shape[-1]).clamp_min(1.0)
+                    audio_loss = ((pred_audio_masked.float() - target_audio_masked.float()) ** 2).sum() / denom
+                    loss = loss + float(args.audio_loss_weight) * audio_loss
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients and args.max_grad_norm > 0:
@@ -354,7 +434,13 @@ def train(args: argparse.Namespace) -> None:
                     avg_loss = running_loss / args.log_every_n_steps
                     running_loss = 0.0
                     lr = scheduler.get_last_lr()[0]
-                    logger.info(f"step={global_step} loss={avg_loss:.6f} lr={lr:.6e}")
+                    if audio_loss is None:
+                        logger.info(f"step={global_step} loss={avg_loss:.6f} video_loss={video_loss.detach().item():.6f} lr={lr:.6e}")
+                    else:
+                        logger.info(
+                            f"step={global_step} loss={avg_loss:.6f} video_loss={video_loss.detach().item():.6f} "
+                            f"audio_loss={audio_loss.detach().item():.6f} lr={lr:.6e}"
+                        )
 
                 if args.save_every_n_steps > 0 and global_step % args.save_every_n_steps == 0:
                     accelerator.wait_for_everyone()
@@ -441,6 +527,8 @@ def setup_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--discrete_flow_shift", type=float, default=5.0, help="Shift used in flow-style sigma sampling.")
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--train_audio", type=str, default="auto", help="Audio training mode: auto/always/never.")
+    parser.add_argument("--audio_loss_weight", type=float, default=1.0, help="Weight applied to audio MSE when audio training is enabled.")
 
     parser.add_argument("--train_lora", action="store_true", help="Enable LoRA training (freeze base DiT, train LoRA only).")
     parser.add_argument(

@@ -45,6 +45,59 @@ class MagiInferenceContext:
     audio_in_channels: int
 
 
+def _maybe_empty_cuda_cache() -> None:
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _move_module(module_obj, device: torch.device, dtype: Optional[torch.dtype] = None) -> None:
+    if hasattr(module_obj, "to"):
+        if dtype is None:
+            module_obj.to(device=device)
+        else:
+            module_obj.to(device=device, dtype=dtype)
+
+
+def _move_audio_vae(audio_vae, device: torch.device) -> None:
+    if hasattr(audio_vae, "vae_model"):
+        audio_vae.vae_model.to(device)
+
+
+def _maybe_offload_vae(ctx: MagiInferenceContext, enabled: bool) -> None:
+    if enabled:
+        _move_module(ctx.vae, torch.device("cpu"))
+        _maybe_empty_cuda_cache()
+
+
+def _maybe_offload_audio_vae(ctx: MagiInferenceContext, enabled: bool) -> None:
+    if enabled:
+        _move_audio_vae(ctx.audio_vae, torch.device("cpu"))
+        _maybe_empty_cuda_cache()
+
+
+def _get_text_embeddings(
+    ctx: MagiInferenceContext,
+    prompt: str,
+    txt_model_path: str,
+    offload_text_encoder: bool,
+) -> Tuple[torch.Tensor, int]:
+    prompt_embeds, prompt_len = ctx.get_padded_t5_gemma_embedding(
+        prompt, txt_model_path, str(ctx.device), ctx.model_dtype, ctx.target_length
+    )
+    prompt_embeds = prompt_embeds.to(device=ctx.device, dtype=ctx.model_dtype).contiguous()
+    prompt_len = int(prompt_len)
+
+    if offload_text_encoder:
+        from inference.model.t5_gemma.t5_gemma_model import get_t5_gemma_encoder
+
+        encoder = get_t5_gemma_encoder(txt_model_path, str(ctx.device), ctx.model_dtype)
+        if hasattr(encoder, "model"):
+            encoder.model.to(torch.device("cpu"))
+        _maybe_empty_cuda_cache()
+
+    return prompt_embeds, prompt_len
+
+
 def add_common_inference_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--pretrained_model_name_or_path", type=str, required=True, help="Path to daVinci DiT checkpoint.")
     parser.add_argument("--config_load_path", type=str, default=None, help="Optional daVinci config.json path.")
@@ -80,6 +133,9 @@ def add_common_inference_arguments(parser: argparse.ArgumentParser) -> argparse.
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--model_dtype", type=str, default="bf16", help="bf16/fp16/fp32")
     parser.add_argument("--decode_dtype", type=str, default="bf16", help="bf16/fp16/fp32")
+    parser.add_argument("--offload_text_encoder", action="store_true", help="Move T5-Gemma encoder back to CPU after prompt encoding.")
+    parser.add_argument("--offload_vae", action="store_true", help="Keep video VAE on CPU except when encoding/decoding latents.")
+    parser.add_argument("--offload_audio_vae", action="store_true", help="Keep audio VAE on CPU except when decoding audio latents.")
     parser.add_argument("--output_dir", type=str, default=".")
     parser.add_argument("--output_name", type=str, default="magi_sample")
     parser.add_argument("--video_only", action="store_true", help="Save silent video only (skip native audio decode/mux).")
@@ -257,6 +313,43 @@ def prepare_inference_context(args: argparse.Namespace) -> MagiInferenceContext:
     logger.info(f"Loading audio VAE from {args.audio_model_path}")
     audio_vae = SAAudioFeatureExtractor(device=str(device), model_path=args.audio_model_path)
 
+    _maybe_offload_vae_obj = bool(args.offload_vae)
+    _maybe_offload_audio_obj = bool(args.offload_audio_vae)
+    if _maybe_offload_vae_obj:
+        _maybe_offload_vae(
+            MagiInferenceContext(
+                wrapper=wrapper,
+                vae=vae,
+                audio_vae=audio_vae,
+                model_cfg=model_cfg,
+                data_proxy_cfg=data_proxy_cfg,
+                get_padded_t5_gemma_embedding=get_padded_t5_gemma_embedding,
+                target_length=t5_target_length,
+                device=device,
+                model_dtype=model_dtype,
+                decode_dtype=decode_dtype,
+                audio_in_channels=model_cfg.audio_in_channels,
+            ),
+            True,
+        )
+    if _maybe_offload_audio_obj:
+        _maybe_offload_audio_vae(
+            MagiInferenceContext(
+                wrapper=wrapper,
+                vae=vae,
+                audio_vae=audio_vae,
+                model_cfg=model_cfg,
+                data_proxy_cfg=data_proxy_cfg,
+                get_padded_t5_gemma_embedding=get_padded_t5_gemma_embedding,
+                target_length=t5_target_length,
+                device=device,
+                model_dtype=model_dtype,
+                decode_dtype=decode_dtype,
+                audio_in_channels=model_cfg.audio_in_channels,
+            ),
+            True,
+        )
+
     return MagiInferenceContext(
         wrapper=wrapper,
         vae=vae,
@@ -318,22 +411,24 @@ def generate_video(
     from inference.pipeline.video_process import merge_video_and_audio
     from inference.pipeline.scheduler_unipc import FlowUniPCMultistepScheduler
 
-    prompt_embeds, prompt_len = ctx.get_padded_t5_gemma_embedding(
-        args.prompt, args.txt_model_path, str(ctx.device), ctx.model_dtype, ctx.target_length
+    prompt_embeds, prompt_len = _get_text_embeddings(
+        ctx,
+        args.prompt,
+        args.txt_model_path,
+        bool(args.offload_text_encoder),
     )
-    prompt_embeds = prompt_embeds.to(device=ctx.device, dtype=ctx.model_dtype).contiguous()
-    prompt_len = int(prompt_len)
 
     audio_cfg_scale = float(args.audio_guidance_scale) if args.audio_guidance_scale is not None else float(args.guidance_scale)
     do_cfg = max(float(args.guidance_scale), audio_cfg_scale, float(args.low_t_video_guidance)) > 1.0
 
     if do_cfg:
         if args.negative_prompt.strip():
-            neg_embeds, neg_len = ctx.get_padded_t5_gemma_embedding(
-                args.negative_prompt, args.txt_model_path, str(ctx.device), ctx.model_dtype, ctx.target_length
+            neg_embeds, neg_len = _get_text_embeddings(
+                ctx,
+                args.negative_prompt,
+                args.txt_model_path,
+                bool(args.offload_text_encoder),
             )
-            neg_embeds = neg_embeds.to(device=ctx.device, dtype=ctx.model_dtype).contiguous()
-            neg_len = int(neg_len)
         else:
             # Avoid T5-Gemma empty-string masking edge cases by treating empty negative prompts
             # as unconditional generation with zero text tokens.
@@ -352,7 +447,13 @@ def generate_video(
         dtype=torch.float32,
         generator=generator,
     )
-    latent_image = _encode_image_latent(ctx, args.image_path, latent_shape) if args.image_path else None
+    if args.image_path:
+        if args.offload_vae:
+            _move_module(ctx.vae, ctx.device, ctx.decode_dtype)
+        latent_image = _encode_image_latent(ctx, args.image_path, latent_shape)
+        _maybe_offload_vae(ctx, bool(args.offload_vae))
+    else:
+        latent_image = None
 
     video_scheduler = FlowUniPCMultistepScheduler()
     audio_scheduler = FlowUniPCMultistepScheduler()
@@ -396,7 +497,10 @@ def generate_video(
     if latent_image is not None:
         latent_video[:, :, :1] = latent_image[:, :, :1]
 
+    if args.offload_vae:
+        _move_module(ctx.vae, ctx.device, ctx.decode_dtype)
     frames = _decode_video_latent(ctx.vae, latent_video, ctx.decode_dtype)
+    _maybe_offload_vae(ctx, bool(args.offload_vae))
     out_path = _make_output_path(args.output_dir, args.output_name)
 
     if args.video_only:
@@ -405,7 +509,10 @@ def generate_video(
         return out_path
 
     # Native style: decode audio latents then mux with video.
+    if args.offload_audio_vae:
+        _move_audio_vae(ctx.audio_vae, ctx.device)
     audio_np = _decode_audio_latent(ctx.audio_vae, latent_audio)
+    _maybe_offload_audio_vae(ctx, bool(args.offload_audio_vae))
     tmp_tag = uuid.uuid4().hex
     tmp_video = os.path.join(args.output_dir, f".{args.output_name}_{tmp_tag}.video.mp4")
     tmp_audio = os.path.join(args.output_dir, f".{args.output_name}_{tmp_tag}.audio.wav")
