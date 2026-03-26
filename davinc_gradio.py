@@ -130,7 +130,7 @@ def build_demo(defaults: dict):
     }
     """
 
-    def _make_config(offload_text_encoder: bool, offload_vae: bool, offload_audio_vae: bool) -> LoadedConfig:
+    def _make_config() -> LoadedConfig:
         return LoadedConfig(
             pretrained_model_name_or_path=defaults["pretrained_model_name_or_path"],
             config_load_path=defaults["config_load_path"],
@@ -141,13 +141,13 @@ def build_demo(defaults: dict):
             model_dtype=defaults["model_dtype"],
             decode_dtype=defaults["decode_dtype"],
             cpu_offload=bool(defaults["cpu_offload"]),
-            offload_text_encoder=bool(offload_text_encoder),
-            offload_vae=bool(offload_vae),
-            offload_audio_vae=bool(offload_audio_vae),
+            offload_text_encoder=True,
+            offload_vae=True,
+            offload_audio_vae=True,
         )
 
-    def load_model(offload_text_encoder: bool, offload_vae: bool, offload_audio_vae: bool) -> str:
-        config = _make_config(offload_text_encoder, offload_vae, offload_audio_vae)
+    def load_model() -> str:
+        config = _make_config()
         return manager.ensure_loaded(config)
 
     def unload_model() -> str:
@@ -161,9 +161,6 @@ def build_demo(defaults: dict):
         height: int,
         num_frames: int,
         seed: int,
-        offload_text_encoder: bool,
-        offload_vae: bool,
-        offload_audio_vae: bool,
         progress=gr.Progress(track_tqdm=True),
     ):
         if prompt is None or prompt.strip() == "":
@@ -173,7 +170,7 @@ def build_demo(defaults: dict):
         num_frames = _normalize_num_frames(num_frames)
         seed = random.randint(0, 2**31 - 1) if seed in (None, "", -1) else int(seed)
 
-        load_message = load_model(offload_text_encoder, offload_vae, offload_audio_vae)
+        load_message = load_model()
         config = manager.loaded_config
         if manager.ctx is None or config is None:
             raise gr.Error("模型尚未成功加载。")
@@ -209,9 +206,9 @@ def build_demo(defaults: dict):
                 output_name="davinc_sample",
                 video_only=False,
                 txt_model_path=config.txt_model_path,
-                offload_text_encoder=bool(offload_text_encoder),
-                offload_vae=bool(offload_vae),
-                offload_audio_vae=bool(offload_audio_vae),
+                offload_text_encoder=True,
+                offload_vae=True,
+                offload_audio_vae=True,
             )
 
             progress(0, desc="开始推理")
@@ -262,9 +259,6 @@ def build_demo(defaults: dict):
                         ]
                     )
                 )
-                offload_text_encoder = gr.Checkbox(label="Offload Text Encoder", value=True)
-                offload_vae = gr.Checkbox(label="Offload Video VAE", value=True)
-                offload_audio_vae = gr.Checkbox(label="Offload Audio VAE", value=True)
                 with gr.Row():
                     load_btn = gr.Button("加载模型", variant="primary")
                     unload_btn = gr.Button("卸载模型")
@@ -285,7 +279,6 @@ def build_demo(defaults: dict):
 
         load_btn.click(
             load_model,
-            inputs=[offload_text_encoder, offload_vae, offload_audio_vae],
             outputs=status,
         )
         unload_btn.click(unload_model, outputs=status)
@@ -299,9 +292,6 @@ def build_demo(defaults: dict):
                 height,
                 num_frames,
                 seed,
-                offload_text_encoder,
-                offload_vae,
-                offload_audio_vae,
             ],
             outputs=[video, status],
         )
