@@ -109,6 +109,7 @@ def build_demo(defaults: dict):
     manager = DavincManager()
     output_dir = Path(defaults["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
+    initial_status = "模型加载中..."
 
     theme = gr.themes.Soft(
         primary_hue="blue",
@@ -240,34 +241,16 @@ def build_demo(defaults: dict):
         gr.Markdown(
             """
             # daVinci 推理
-            蓝白主题的最小推理界面。模型只加载一次，请求串行排队，避免多任务把显存打满。
+            蓝白主题的最小推理界面，请求串行排队，避免多任务把显存打满。
             """
         )
 
         with gr.Row(elem_classes=["davinc-card"]):
             with gr.Column(scale=1):
-                gr.Markdown(
-                    "\n".join(
-                        [
-                            f"`ckpt`: {defaults['pretrained_model_name_or_path']}",
-                            f"`vae`: {defaults['vae_model_path']}",
-                            f"`audio`: {defaults['audio_model_path']}",
-                            f"`text`: {defaults['txt_model_path']}",
-                            f"`dtype`: {defaults['model_dtype']}/{defaults['decode_dtype']}",
-                            f"`device`: {defaults['device']}",
-                            f"`output_dir`: {defaults['output_dir']}",
-                        ]
-                    )
-                )
                 with gr.Row():
-                    load_btn = gr.Button("加载模型", variant="primary")
-                    unload_btn = gr.Button("卸载模型")
-                status = gr.Textbox(label="状态", lines=8, interactive=False)
-
-            with gr.Column(scale=2):
-                prompt = gr.Textbox(label="Prompt", lines=8, placeholder="描述动作、人物、镜头语言")
-                negative_prompt = gr.Textbox(label="Negative Prompt", lines=4, placeholder="不希望出现的内容")
-                first_frame = gr.Image(label="First Frame", type="pil")
+                    prompt = gr.Textbox(label="Prompt", lines=10, placeholder="描述动作、人物、镜头语言")
+                    negative_prompt = gr.Textbox(label="Negative Prompt", lines=10, placeholder="不希望出现的内容")
+                    first_frame = gr.Image(label="First Frame", type="pil", height=260)
                 with gr.Row():
                     width = gr.Slider(label="Width", minimum=MIN_SIDE, maximum=MAX_SIDE, step=SIDE_STEP, value=480)
                     height = gr.Slider(label="Height", minimum=MIN_SIDE, maximum=MAX_SIDE, step=SIDE_STEP, value=272)
@@ -276,12 +259,8 @@ def build_demo(defaults: dict):
                     seed = gr.Number(label="Seed (-1 随机)", value=-1, precision=0)
                 generate_btn = gr.Button("生成视频", variant="primary")
                 video = gr.Video(label="Output Video", interactive=False)
+                status = gr.Textbox(label="状态", lines=5, interactive=False, value=initial_status)
 
-        load_btn.click(
-            load_model,
-            outputs=status,
-        )
-        unload_btn.click(unload_model, outputs=status)
         generate_btn.click(
             generate,
             inputs=[
@@ -295,6 +274,8 @@ def build_demo(defaults: dict):
             ],
             outputs=[video, status],
         )
+
+        demo.load(load_model, outputs=status)
 
     return demo
 
