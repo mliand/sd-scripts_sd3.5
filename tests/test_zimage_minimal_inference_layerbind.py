@@ -101,6 +101,12 @@ def test_build_prompts_includes_layerbind_fields():
         layerbind_eta1=0.2,
         layerbind_eta2=0.7,
         layerbind_beta=0.7,
+        layerbind_hard_binding_layers=None,
+        layerbind_blend_mode="alpha",
+        layerbind_save_intermediates=False,
+        layerbind_collect_layer_stats=True,
+        layerbind_layer_stats_path="layer_stats.json",
+        layerbind_layer_stats_top_k=7,
     )
 
     prompts = zimage_minimal_inference.build_prompts(args)
@@ -108,6 +114,9 @@ def test_build_prompts_includes_layerbind_fields():
     assert len(prompts) == 1
     assert prompts[0]["layerbind_layout"] == "layout.json"
     assert prompts[0]["layerbind_eta1"] == 0.2
+    assert prompts[0]["layerbind_collect_layer_stats"] is True
+    assert prompts[0]["layerbind_layer_stats_path"] == "layer_stats.json"
+    assert prompts[0]["layerbind_layer_stats_top_k"] == 7
 
 
 def test_create_image_freqs_for_caption_length_matches_requested_offset():
@@ -214,3 +223,43 @@ def test_phase1_branch_state_evolves_independently_from_current_global_patches()
     assert second_branch_patches.shape == current_global_region.shape
     assert not torch.allclose(first_branch_patches, second_branch_patches)
     assert not torch.allclose(second_branch_patches, current_global_region)
+
+
+def test_finalize_layerbind_layer_stats_suggests_text_dominant_layers():
+    accumulator = {
+        "num_layers": 4,
+        "top_k": 3,
+        "layout_scene_prompt": "scene",
+        "layout_background_prompt": "background",
+        "regions": [],
+        "layers": {
+            "0": {
+                "self_attention_sum": 0.5,
+                "background_attention_sum": 1.0,
+                "text_attention_sum": 2.0,
+                "query_vector_count": 2.0,
+            },
+            "1": {
+                "self_attention_sum": 0.5,
+                "background_attention_sum": 3.0,
+                "text_attention_sum": 1.0,
+                "query_vector_count": 2.0,
+            },
+            "2": {
+                "self_attention_sum": 0.5,
+                "background_attention_sum": 1.0,
+                "text_attention_sum": 5.0,
+                "query_vector_count": 2.0,
+            },
+            "3": {
+                "self_attention_sum": 0.5,
+                "background_attention_sum": 1.0,
+                "text_attention_sum": 4.0,
+                "query_vector_count": 2.0,
+            },
+        },
+    }
+
+    summary = zimage_minimal_inference.finalize_layerbind_layer_stats(accumulator)
+
+    assert summary["suggested_hard_binding_layers"] == [0, 2, 3]

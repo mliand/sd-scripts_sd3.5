@@ -377,6 +377,94 @@ class ZImageAttention(nn.Module):
         hidden_states = attention(query, key, value, attn_params=attn_params)
         return self._finalize_attention_output(hidden_states, gate_score, dtype)
 
+    @staticmethod
+    def _compute_attention_segment_statistics(
+        query: torch.Tensor,
+        key: torch.Tensor,
+        segment_lengths: Sequence[int],
+        segment_names: Sequence[str],
+        query_chunk_size: int = 64,
+    ) -> Dict[str, float]:
+        if len(segment_lengths) != len(segment_names):
+            raise ValueError(f"Expected the same number of segment names and lengths, got {len(segment_names)} vs {len(segment_lengths)}")
+
+        query = query.to(dtype=torch.float32)
+        key = key.to(dtype=torch.float32)
+        scale = query.shape[-1] ** -0.5
+
+        segment_offsets = []
+        cursor = 0
+        for length in segment_lengths:
+            segment_offsets.append((cursor, cursor + int(length)))
+            cursor += int(length)
+
+        totals = {name: 0.0 for name in segment_names}
+        query_vector_count = 0
+
+        for start in range(0, query.shape[1], query_chunk_size):
+            end = min(query.shape[1], start + query_chunk_size)
+            query_chunk = query[:, start:end]
+            logits = torch.einsum("bqhd,bkhd->bhqk", query_chunk, key) * scale
+            probs = torch.softmax(logits, dim=-1)
+
+            for name, (segment_start, segment_end) in zip(segment_names, segment_offsets):
+                if segment_end <= segment_start:
+                    continue
+                totals[name] += probs[..., segment_start:segment_end].sum(dim=-1).sum().item()
+
+            query_vector_count += probs.shape[0] * probs.shape[1] * probs.shape[2]
+
+        if query_vector_count == 0:
+            stats = {f"segment_attention/{name}": 0.0 for name in segment_names}
+            stats["query_vector_count"] = 0.0
+            return stats
+
+        stats = {f"segment_attention/{name}": totals[name] / query_vector_count for name in segment_names}
+        stats["query_vector_count"] = float(query_vector_count)
+        return stats
+
+    def contextual_attention_stats(
+        self,
+        query_states: torch.Tensor,
+        context_states: Optional[Sequence[torch.Tensor] | torch.Tensor] = None,
+        query_freqs_cis: Optional[torch.Tensor] = None,
+        context_freqs_cis: Optional[Sequence[torch.Tensor] | torch.Tensor] = None,
+        include_query_in_kv: bool = True,
+        segment_names: Optional[Sequence[str]] = None,
+        query_chunk_size: int = 64,
+    ) -> Dict[str, float]:
+        context_list = self._normalize_context_states(context_states)
+        context_freqs_list = self._normalize_context_freqs(context_freqs_cis, len(context_list))
+
+        kv_parts = [query_states] if include_query_in_kv else []
+        kv_parts.extend(context_list)
+        if not kv_parts:
+            raise ValueError("contextual_attention_stats requires query in kv or at least one context tensor")
+
+        kv_states = torch.cat(kv_parts, dim=1) if len(kv_parts) > 1 else kv_parts[0]
+        kv_freqs_cis = self._concat_freqs(query_freqs_cis, context_freqs_list, include_query_in_kv)
+
+        if segment_names is None:
+            segment_names = []
+            if include_query_in_kv:
+                segment_names.append("self")
+            segment_names.extend(f"context_{index}" for index in range(len(context_list)))
+
+        segment_lengths = []
+        if include_query_in_kv:
+            segment_lengths.append(int(query_states.shape[1]))
+        segment_lengths.extend(int(context.shape[1]) for context in context_list)
+
+        query, _gate_score, dtype = self._project_query(query_states, query_freqs_cis)
+        key, _value = self._project_key_value(kv_states, kv_freqs_cis, dtype=dtype)
+        return self._compute_attention_segment_statistics(
+            query,
+            key,
+            segment_lengths=segment_lengths,
+            segment_names=segment_names,
+            query_chunk_size=query_chunk_size,
+        )
+
     def _forward(
         self, hidden_states: torch.Tensor, freqs_cis: Optional[torch.Tensor] = None, attn_params: Optional[AttentionParams] = None
     ) -> torch.Tensor:
@@ -567,6 +655,39 @@ class ZImageTransformerBlock(nn.Module):
             include_query_in_kv=include_query_in_kv,
         )
         return self._apply_attention_and_ffn(query_states, attn_out, scale_mlp=scale_mlp, gate_msa=gate_msa, gate_mlp=gate_mlp)
+
+    def contextual_attention_stats(
+        self,
+        query_states: torch.Tensor,
+        query_freqs_cis: Optional[torch.Tensor],
+        context_states: Optional[Sequence[torch.Tensor] | torch.Tensor] = None,
+        context_freqs_cis: Optional[Sequence[torch.Tensor] | torch.Tensor] = None,
+        adaln_input: Optional[torch.Tensor] = None,
+        include_query_in_kv: bool = True,
+        segment_names: Optional[Sequence[str]] = None,
+        query_chunk_size: int = 64,
+    ) -> Dict[str, float]:
+        context_list = self._normalize_context_states(context_states)
+        context_freqs_list = self._normalize_context_freqs(context_freqs_cis, len(context_list))
+
+        modulation = self._get_modulation(adaln_input)
+        if modulation is None:
+            normalized_query = self._normalize_attention_input(query_states)
+            normalized_context = [self._normalize_attention_input(context) for context in context_list]
+        else:
+            scale_msa, _gate_msa, _scale_mlp, _gate_mlp = modulation
+            normalized_query = self._normalize_attention_input(query_states, scale_msa)
+            normalized_context = [self._normalize_attention_input(context, scale_msa) for context in context_list]
+
+        return self.attention.contextual_attention_stats(
+            normalized_query,
+            context_states=normalized_context,
+            query_freqs_cis=query_freqs_cis,
+            context_freqs_cis=context_freqs_list,
+            include_query_in_kv=include_query_in_kv,
+            segment_names=segment_names,
+            query_chunk_size=query_chunk_size,
+        )
 
     def _forward(
         self,

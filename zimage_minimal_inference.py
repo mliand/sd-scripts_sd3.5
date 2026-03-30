@@ -1,6 +1,7 @@
 # Minimum Inference Code for Z-Image
 
 import argparse
+import json
 import math
 import os
 import random
@@ -73,6 +74,23 @@ def add_layerbind_arguments(parser: argparse.ArgumentParser):
         action="store_true",
         help="save LayerBind intermediate images such as the t1 blend result",
     )
+    parser.add_argument(
+        "--layerbind_collect_layer_stats",
+        action="store_true",
+        help="collect Phase 1 CTA attention statistics to search Z-Image hard-binding layers",
+    )
+    parser.add_argument(
+        "--layerbind_layer_stats_path",
+        type=str,
+        default=None,
+        help="optional path to save LayerBind layer-search statistics JSON",
+    )
+    parser.add_argument(
+        "--layerbind_layer_stats_top_k",
+        type=int,
+        default=None,
+        help="number of hard-binding layers to recommend when saving layer-search statistics",
+    )
 
 
 def prepare_layerbind_layout(prompt_dict: dict[str, Any], width: int, height: int):
@@ -110,6 +128,9 @@ def build_single_prompt_dict(args: argparse.Namespace) -> dict[str, Any]:
         "layerbind_hard_binding_layers": args.layerbind_hard_binding_layers,
         "layerbind_blend_mode": args.layerbind_blend_mode,
         "layerbind_save_intermediates": args.layerbind_save_intermediates,
+        "layerbind_collect_layer_stats": args.layerbind_collect_layer_stats,
+        "layerbind_layer_stats_path": args.layerbind_layer_stats_path,
+        "layerbind_layer_stats_top_k": args.layerbind_layer_stats_top_k,
     }
 
 
@@ -126,6 +147,9 @@ def build_prompts(args: argparse.Namespace):
         prompt.setdefault("layerbind_hard_binding_layers", args.layerbind_hard_binding_layers)
         prompt.setdefault("layerbind_blend_mode", args.layerbind_blend_mode)
         prompt.setdefault("layerbind_save_intermediates", args.layerbind_save_intermediates)
+        prompt.setdefault("layerbind_collect_layer_stats", args.layerbind_collect_layer_stats)
+        prompt.setdefault("layerbind_layer_stats_path", args.layerbind_layer_stats_path)
+        prompt.setdefault("layerbind_layer_stats_top_k", args.layerbind_layer_stats_top_k)
     return prompts
 
 
@@ -342,6 +366,138 @@ def predict_branch_patch_residual(
     return final_layer(branch_tokens, adaln_input.type_as(branch_tokens))
 
 
+def create_layerbind_layer_stats_accumulator(transformer, prompt_dict: dict[str, Any], layout) -> Optional[dict[str, Any]]:
+    if layout is None or not bool(prompt_dict.get("layerbind_collect_layer_stats", False)):
+        return None
+
+    return {
+        "num_layers": len(transformer.layers),
+        "top_k": prompt_dict.get("layerbind_layer_stats_top_k"),
+        "layout_scene_prompt": layout.scene_prompt,
+        "layout_background_prompt": layout.background_prompt,
+        "regions": [
+            {
+                "layer_index": region.layer_index,
+                "bbox": list(region.bbox),
+                "token_count": len(region.token_indices),
+                "region_prompt": region.region_prompt,
+            }
+            for region in layout.regions
+        ],
+        "layers": {
+            str(layer_idx): {
+                "self_attention_sum": 0.0,
+                "background_attention_sum": 0.0,
+                "text_attention_sum": 0.0,
+                "query_vector_count": 0.0,
+            }
+            for layer_idx in range(len(transformer.layers))
+        },
+    }
+
+
+def record_layerbind_layer_stats(
+    accumulator: Optional[dict[str, Any]],
+    layer_idx: int,
+    stats: dict[str, float],
+):
+    if accumulator is None:
+        return
+
+    layer_stats = accumulator["layers"][str(layer_idx)]
+    query_vector_count = float(stats.get("query_vector_count", 0.0))
+    if query_vector_count <= 0.0:
+        return
+
+    layer_stats["self_attention_sum"] += float(stats.get("segment_attention/self", 0.0)) * query_vector_count
+    layer_stats["background_attention_sum"] += float(stats.get("segment_attention/background", 0.0)) * query_vector_count
+    layer_stats["text_attention_sum"] += float(stats.get("segment_attention/text", 0.0)) * query_vector_count
+    layer_stats["query_vector_count"] += query_vector_count
+
+
+def finalize_layerbind_layer_stats(accumulator: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    if accumulator is None:
+        return None
+
+    num_layers = int(accumulator["num_layers"])
+    default_top_k = len(get_default_layerbind_hard_binding_layers(num_layers))
+    top_k = accumulator.get("top_k")
+    if top_k is None:
+        top_k = default_top_k
+    top_k = max(1, min(int(top_k), num_layers))
+
+    per_layer = []
+    for layer_idx in range(num_layers):
+        raw_stats = accumulator["layers"][str(layer_idx)]
+        query_vector_count = float(raw_stats["query_vector_count"])
+        if query_vector_count > 0.0:
+            self_attention = raw_stats["self_attention_sum"] / query_vector_count
+            background_attention = raw_stats["background_attention_sum"] / query_vector_count
+            text_attention = raw_stats["text_attention_sum"] / query_vector_count
+        else:
+            self_attention = 0.0
+            background_attention = 0.0
+            text_attention = 0.0
+
+        per_layer.append(
+            {
+                "layer_idx": layer_idx,
+                "query_vector_count": query_vector_count,
+                "self_attention": self_attention,
+                "background_attention": background_attention,
+                "text_attention": text_attention,
+                "text_minus_background": text_attention - background_attention,
+                "text_over_background": text_attention / max(background_attention, 1e-6),
+            }
+        )
+
+    ranked_layers = sorted(
+        [item for item in per_layer if item["query_vector_count"] > 0.0],
+        key=lambda item: (item["text_minus_background"], item["text_over_background"], -item["layer_idx"]),
+        reverse=True,
+    )
+    if not ranked_layers:
+        suggested_layers = get_default_layerbind_hard_binding_layers(num_layers)
+    else:
+        suggested_layers = [0]
+        for item in ranked_layers:
+            layer_idx = int(item["layer_idx"])
+            if layer_idx == 0:
+                continue
+            suggested_layers.append(layer_idx)
+            if len(suggested_layers) >= top_k:
+                break
+        suggested_layers = sorted(set(suggested_layers))
+
+    return {
+        "num_layers": num_layers,
+        "top_k": top_k,
+        "suggested_hard_binding_layers": suggested_layers,
+        "default_mapped_layers": get_default_layerbind_hard_binding_layers(num_layers),
+        "layout_scene_prompt": accumulator.get("layout_scene_prompt", ""),
+        "layout_background_prompt": accumulator.get("layout_background_prompt", ""),
+        "regions": accumulator.get("regions", []),
+        "layers": per_layer,
+    }
+
+
+def resolve_layerbind_layer_stats_output_path(
+    prompt_dict: dict[str, Any],
+    output_dir: str,
+    output_name: Optional[str],
+    seed: int,
+    sample_steps: int,
+    index: int,
+):
+    custom_path = prompt_dict.get("layerbind_layer_stats_path")
+    if custom_path:
+        return custom_path
+
+    os.makedirs(output_dir, exist_ok=True)
+    base_name = output_name or "layerbind"
+    return os.path.join(output_dir, f"{base_name}_{sample_steps:06d}_{index:02d}_{seed}_layer_stats.json")
+
+
 def blend_region_tokens(
     x_tokens: torch.Tensor,
     region_states: list[dict[str, Any]],
@@ -425,6 +581,7 @@ def run_layerbind_forward(
     phase2_delta_scale: float,
     phase2_branch_context_scale: float,
     apply_phase1_blend: bool,
+    layer_stats_accumulator: Optional[dict[str, Any]] = None,
 ):
     active_condition = background_condition if phase == "phase1" else scene_condition
     cap_tokens = active_condition["tokens"]
@@ -500,6 +657,18 @@ def run_layerbind_forward(
                 )
                 local_background_tokens = background_tokens
                 local_background_freqs = background_freqs
+
+                if layer_stats_accumulator is not None:
+                    layer_attention_stats = layer.contextual_attention_stats(
+                        region_state["branch_tokens"],
+                        branch_freqs,
+                        context_states=[background_tokens, region_state["text_tokens"]],
+                        context_freqs_cis=[background_freqs, region_condition["freqs"]],
+                        adaln_input=adaln_input,
+                        include_query_in_kv=True,
+                        segment_names=["self", "background", "text"],
+                    )
+                    record_layerbind_layer_stats(layer_stats_accumulator, layer_idx, layer_attention_stats)
 
                 if layer_idx in hard_binding_layers:
                     region_state["branch_tokens"] = layer.contextual_forward(
@@ -746,6 +915,7 @@ def generate_image(
     blend_mode = prompt_dict.get("layerbind_blend_mode", "alpha")
     save_intermediates = bool(prompt_dict.get("layerbind_save_intermediates", False))
     intermediate_dir = None
+    layer_stats_accumulator = None
     if use_layerbind:
         with torch.autocast(device_type=device.type, dtype=dtype), torch.no_grad():
             layerbind_conditions = prepare_layerbind_conditions(
@@ -778,6 +948,7 @@ def generate_image(
             hard_binding_layers,
             blend_mode,
         )
+        layer_stats_accumulator = create_layerbind_layer_stats_accumulator(transformer, prompt_dict, layerbind_layout)
         if save_intermediates:
             intermediate_dir = os.path.join(output_dir, "layerbind_debug")
             os.makedirs(intermediate_dir, exist_ok=True)
@@ -817,6 +988,7 @@ def generate_image(
                     phase2_delta_scale=layerbind_layout.config.phase2_delta_scale,
                     phase2_branch_context_scale=layerbind_layout.config.phase2_branch_context_scale,
                     apply_phase1_blend=phase == "phase1" and (i + 1) == t1_step,
+                    layer_stats_accumulator=layer_stats_accumulator,
                 )
             else:
                 model_out = transformer(x=latent_model_input, t=timestep, cap_feats=prompt_embeds, cap_mask=prompt_mask)
@@ -849,6 +1021,24 @@ def generate_image(
     index = prompt_dict.get("enum", 0)
     filename = f"{'' if output_name is None else output_name + '_'}{num_suffix}_{index:02d}_{ts_str}{seed_suffix}.png"
     image.save(os.path.join(output_dir, filename))
+
+    layer_stats_summary = finalize_layerbind_layer_stats(layer_stats_accumulator)
+    if layer_stats_summary is not None:
+        layer_stats_path = resolve_layerbind_layer_stats_output_path(
+            prompt_dict,
+            output_dir=output_dir,
+            output_name=output_name,
+            seed=seed,
+            sample_steps=sample_steps,
+            index=index,
+        )
+        with open(layer_stats_path, "w", encoding="utf-8") as handle:
+            json.dump(layer_stats_summary, handle, indent=2, ensure_ascii=False)
+        logger.info(
+            "layerbind layer stats saved: %s suggested_hard_binding_layers=%s",
+            layer_stats_path,
+            layer_stats_summary["suggested_hard_binding_layers"],
+        )
 
 
 def main():

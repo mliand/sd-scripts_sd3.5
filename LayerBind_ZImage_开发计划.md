@@ -594,11 +594,15 @@
   - `Phase 2` 已从“复用 Phase 1 的 diff-alpha 融合”改为固定 `beta * region mask` 的顺序 compositing
   - 默认 `hard_binding_layers` 已从保守 4 层改回更接近论文 SD3.5 文本主导层密度的 9 层映射
   - `Phase 1` 已不再在每个 timestep 开始时回锚到当前全局区域 token；当前会在首次进入 `Phase 1` 时从全局 latent patch 拷贝 branch seed，并在后续 timestep 中通过独立 branch residual 执行局部 ODE 更新
+- 已开始落地 `M7` 的 attention 统计式 layer search：
+  - 在 [library/zimage_model.py](/home/coco/workspace/sd-scripts_sd3.5/library/zimage_model.py) 中新增 `contextual_attention_stats`，直接基于真实 CTA 的 `q/k` 投影统计 branch query 对 `self / background / text` 的平均注意力占比
+  - 在 [zimage_minimal_inference.py](/home/coco/workspace/sd-scripts_sd3.5/zimage_minimal_inference.py) 中新增 `--layerbind_collect_layer_stats`、`--layerbind_layer_stats_path`、`--layerbind_layer_stats_top_k`
+  - 统计结果会在一次正常 LayerBind 推理后输出 JSON，并给出一版 `suggested_hard_binding_layers`
+  - 当前统计逻辑记录的是 `Phase 1` 每一层中 branch 对标准 `background + region text` 上下文的响应强度，用于逼近论文里“文本主导层”筛选标准
 
 ### 15.2 本轮未完成
 
-- `M7` 的 attention 统计式 layer search 尚未实现
-- 当前 `hard binding layers` 是基于 FLUX 层分布映射到 30 层的启发式默认值，不是实测统计值
+- 当前 `hard binding layers` 默认值仍是基于 FLUX 层分布映射到 30 层的启发式结果；虽然已经支持导出 Z-Image 自身的 layer-search JSON，但还没有在真实权重环境上正式跑出一版稳定的实测层列表
 - 当前版本已接入 `Phase 1/2`，但还没有在真实权重环境上做过视觉质量调参
 - 当前 `Phase 1` branch 已具备 patch-latent 级别的跨 timestep ODE 轨迹，但仍是“局部 branch patch”表示，不是维护一份完整全图 latent 副本的实现
 
@@ -609,6 +613,7 @@
 - 已通过代码层面静态接线检查：
   - 原始推理入口、样例 JSON、smoke 脚本都已写入仓库
   - `Phase 1` branch 轨迹的新增回归测试也已写入测试文件
+  - `M7` 的 Layer Search 统计接口、JSON 落盘逻辑和推荐层列表生成逻辑也已写入测试文件
 - 运行时 `pytest` 尚未完成：
   - 当前可见环境中，`base` 没有 `torch`
   - `sd_train` 环境同时缺少 `torch` 与 `pytest`
@@ -621,6 +626,9 @@
   - base 无 layout 路径是否无回归
   - layout + `Phase 1` 是否能形成稳定区域绑定
   - `Phase 2` 与 `hard binding layers` 的默认值是否需要调参
-- 若实机结果正常，下一步应集中补 `M7`：
-  - 记录早期若干步的层响应
-  - 产出 Z-Image 专属 hard-binding layer 列表
+- 在真实模型环境上新增一轮 `M7` 实测：
+  - 运行带 `--layerbind_collect_layer_stats` 的正常推理
+  - 检查生成的 `layer_stats.json` 中 `text_minus_background` 排名与 `suggested_hard_binding_layers`
+  - 若结果稳定，再把默认 `hard_binding_layers` 从启发式映射切到实测列表
+- 推荐测试命令：
+  - `python zimage_minimal_inference.py ... --layerbind_layout ./examples/layerbind_layout_example.json --layerbind_collect_layer_stats --layerbind_layer_stats_path outputs/layerbind_test/layer_stats.json --bf16`
