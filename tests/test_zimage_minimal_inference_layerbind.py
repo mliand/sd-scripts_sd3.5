@@ -78,3 +78,27 @@ def test_build_prompts_includes_layerbind_fields():
     assert len(prompts) == 1
     assert prompts[0]["layerbind_layout"] == "layout.json"
     assert prompts[0]["layerbind_eta1"] == 0.2
+
+
+def test_create_image_freqs_for_caption_length_matches_requested_offset():
+    class FakeTransformer:
+        def create_image_position_ids(self, f_tokens, h_tokens, w_tokens, cap_seq_len, device):
+            return zimage_minimal_inference.torch.tensor(
+                [[cap_seq_len + 1, 0, 0], [cap_seq_len + 1, 0, 1]],
+                device=device,
+                dtype=zimage_minimal_inference.torch.int32,
+            )
+
+        def rope_embedder(self, position_ids):
+            return position_ids.to(dtype=zimage_minimal_inference.torch.float32)
+
+    freqs = zimage_minimal_inference.create_image_freqs_for_caption_length(
+        FakeTransformer(),
+        token_shape=(1, 1, 2),
+        cap_seq_len=5,
+        batch_size=1,
+        device=zimage_minimal_inference.torch.device("cpu"),
+    )
+
+    assert freqs.shape == (1, 2, 3)
+    assert freqs[0, 0, 0].item() == 6.0

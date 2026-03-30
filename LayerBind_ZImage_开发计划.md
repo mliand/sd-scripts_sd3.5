@@ -567,6 +567,11 @@
 - 已修复两处首轮实机质量问题：
   - `region_states` 不再跨 timestep 复用，避免 branch token 在扩散步之间累积漂移
   - 重叠 bbox 的 token ownership 改为按 `layer_index` 去重，前景 region 优先占有 overlap token
+- 已根据论文 4.3 / 4.4 / 4.5 回调实现方向：
+  - 不再用“删除 Eq.5/6 与 Reverse Adaptation”来换取稳定性
+  - 当前工作树已恢复 `branch/text` 的双向更新、`Hard Binding`、`Reverse Adaptation`
+  - `branch` 初始化改为对齐论文 4.3：在 `Phase 1` 首次进入时从全局 image token 中拷贝，并跨 timestep 持续保留状态
+  - 新增了按 caption length 重建 image token RoPE 的 helper，用于避免局部 CTA 中不同文本长度造成的位置编码错配
 
 ### 15.2 本轮未完成
 
@@ -574,6 +579,7 @@
 - 当前 `hard binding layers` 是基于 FLUX 层分布映射到 30 层的启发式默认值，不是实测统计值
 - `alpha blending` 已有简化版 mask-level beta 融合，但尚未接入论文中的 poisson / otsu / morphology 流程
 - 当前版本已接入 `Phase 1/2`，但还没有在真实权重环境上做过视觉质量调参
+- 当前跨 timestep 保留的是 token-space branch state，而非完整 latent-space ODE branch 轨迹；这比“每步重置 branch”更接近论文，但仍属于第一版近似实现
 
 ### 15.3 当前验证状态
 

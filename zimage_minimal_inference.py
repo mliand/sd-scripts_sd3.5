@@ -295,6 +295,20 @@ def prepare_region_runtime_states(layout, x_seq_len: int, device: torch.device):
     return states
 
 
+def create_image_freqs_for_caption_length(
+    transformer,
+    token_shape: tuple[int, int, int],
+    cap_seq_len: int,
+    batch_size: int,
+    device: torch.device,
+):
+    position_ids = transformer.create_image_position_ids(
+        token_shape[0], token_shape[1], token_shape[2], cap_seq_len=cap_seq_len, device=device
+    )
+    freqs_cis = transformer.rope_embedder(position_ids)
+    return freqs_cis.unsqueeze(0).expand(batch_size, -1, -1)
+
+
 def blend_region_tokens(
     x_tokens: torch.Tensor,
     region_states: list[dict[str, Any]],
@@ -360,6 +374,23 @@ def run_layerbind_forward(
     unified_freqs_cis = torch.cat([x_freqs_cis, cap_freqs_current], dim=1)
     attn_params = transformer.create_main_attention_params(x_meta["seq_len"], cap_mask)
 
+    if phase == "phase1":
+        for region_state, region_condition in zip(region_states, region_conditions):
+            if region_state["indices"].numel() == 0:
+                continue
+            region_x_freqs = create_image_freqs_for_caption_length(
+                transformer,
+                x_meta["token_shape"],
+                cap_seq_len=region_condition["tokens"].shape[1],
+                batch_size=x_tokens.shape[0],
+                device=x_tokens.device,
+            )
+            if region_state["branch_tokens"] is None:
+                branch_query, _ = transformer.select_token_subset(x_tokens, region_state["indices"], region_x_freqs)
+                region_state["branch_tokens"] = branch_query.clone()
+            if region_state["text_tokens"] is None:
+                region_state["text_tokens"] = region_condition["tokens"].clone()
+
     for layer_idx, layer in enumerate(transformer.layers):
         unified, _ = transformer.build_unified_tokens(x_tokens, x_freqs_cis, cap_tokens_current, cap_freqs_current)
         unified = layer(unified, unified_freqs_cis, adaln_input, attn_params=attn_params)
@@ -370,14 +401,16 @@ def run_layerbind_forward(
                 if region_state["indices"].numel() == 0:
                     continue
 
-                branch_query, branch_freqs = transformer.select_token_subset(x_tokens, region_state["indices"], x_freqs_cis)
-                if region_state["branch_tokens"] is None:
-                    region_state["branch_tokens"] = branch_query.clone()
-                if region_state["text_tokens"] is None:
-                    region_state["text_tokens"] = region_condition["tokens"].clone()
-
+                region_x_freqs = create_image_freqs_for_caption_length(
+                    transformer,
+                    x_meta["token_shape"],
+                    cap_seq_len=region_condition["tokens"].shape[1],
+                    batch_size=x_tokens.shape[0],
+                    device=x_tokens.device,
+                )
+                _, branch_freqs = transformer.select_token_subset(x_tokens, region_state["indices"], region_x_freqs)
                 background_tokens, background_freqs = transformer.select_token_subset(
-                    x_tokens, region_state["background_indices"], x_freqs_cis
+                    x_tokens, region_state["background_indices"], region_x_freqs
                 )
 
                 if layer_idx in hard_binding_layers:
@@ -390,11 +423,17 @@ def run_layerbind_forward(
                         include_query_in_kv=True,
                     )
                     if background_tokens.shape[1] > 0:
+                        _, background_bg_freqs = transformer.select_token_subset(
+                            x_tokens, region_state["background_indices"], x_freqs_cis
+                        )
+                        _, branch_bg_freqs = transformer.select_token_subset(
+                            x_tokens, region_state["indices"], x_freqs_cis
+                        )
                         adapted_background = layer.contextual_forward(
                             background_tokens,
-                            background_freqs,
+                            background_bg_freqs,
                             context_states=[cap_tokens_current, region_state["branch_tokens"]],
-                            context_freqs_cis=[cap_freqs_current, branch_freqs],
+                            context_freqs_cis=[cap_freqs_current, branch_bg_freqs],
                             adaln_input=adaln_input,
                             include_query_in_kv=True,
                         )
@@ -423,15 +462,26 @@ def run_layerbind_forward(
             for region_state, region_condition in zip(region_states, region_conditions):
                 if region_state["indices"].numel() == 0:
                     continue
-                region_tokens, region_freqs = transformer.select_token_subset(composed_x_tokens, region_state["indices"], x_freqs_cis)
+                region_x_freqs = create_image_freqs_for_caption_length(
+                    transformer,
+                    x_meta["token_shape"],
+                    cap_seq_len=region_condition["tokens"].shape[1],
+                    batch_size=composed_x_tokens.shape[0],
+                    device=composed_x_tokens.device,
+                )
+                region_tokens, region_freqs = transformer.select_token_subset(
+                    composed_x_tokens, region_state["indices"], region_x_freqs
+                )
+                background_tokens, background_freqs = transformer.select_token_subset(
+                    composed_x_tokens, region_state["background_indices"], region_x_freqs
+                )
                 if region_state["text_tokens"] is None:
                     region_state["text_tokens"] = region_condition["tokens"].clone()
-
                 local_tokens = layer.contextual_forward(
                     region_tokens,
                     region_freqs,
-                    context_states=[region_state["text_tokens"], composed_x_tokens, cap_tokens_current],
-                    context_freqs_cis=[region_condition["freqs"], x_freqs_cis, cap_freqs_current],
+                    context_states=[region_state["text_tokens"], background_tokens],
+                    context_freqs_cis=[region_condition["freqs"], background_freqs],
                     adaln_input=adaln_input,
                     include_query_in_kv=True,
                 )
@@ -609,17 +659,19 @@ def generate_image(
             os.makedirs(intermediate_dir, exist_ok=True)
 
     with torch.autocast(device_type=device.type, dtype=dtype), torch.no_grad():
+        region_states = None
         for i, t in enumerate(timesteps):
             timestep = t.expand(latents.shape[0])
             timestep = (1000 - timestep) / 1000
 
             latent_model_input = latents.to(dtype).unsqueeze(2)
             if use_layerbind and i < t2_step:
-                region_states = prepare_region_runtime_states(
-                    layerbind_layout,
-                    layerbind_conditions["image_sequence_length"],
-                    device=latent_model_input.device,
-                )
+                if region_states is None:
+                    region_states = prepare_region_runtime_states(
+                        layerbind_layout,
+                        layerbind_conditions["image_sequence_length"],
+                        device=latent_model_input.device,
+                    )
                 phase = "phase1" if i < t1_step else "phase2"
                 model_out = run_layerbind_forward(
                     transformer,
