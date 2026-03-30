@@ -757,7 +757,8 @@ def run_layerbind_forward(
                 )
 
         elif phase == "phase2":
-            composed_x_tokens = x_tokens
+            global_x_tokens = x_tokens
+            composed_x_tokens = global_x_tokens
             for region_state, region_condition in zip(region_states, region_conditions):
                 if region_state["indices"].numel() == 0:
                     continue
@@ -765,18 +766,18 @@ def run_layerbind_forward(
                     transformer,
                     x_meta["token_shape"],
                     cap_seq_len=region_condition["tokens"].shape[1],
-                    batch_size=composed_x_tokens.shape[0],
-                    device=composed_x_tokens.device,
+                    batch_size=global_x_tokens.shape[0],
+                    device=global_x_tokens.device,
                 )
                 region_tokens, region_freqs = transformer.select_token_subset(
-                    composed_x_tokens, region_state["indices"], region_x_freqs
+                    global_x_tokens, region_state["indices"], region_x_freqs
                 )
                 if region_state["text_tokens"] is None:
                     region_state["text_tokens"] = region_condition["tokens"].clone()
                 local_tokens = layer.contextual_forward(
                     region_tokens,
                     region_freqs,
-                    context_states=[region_state["text_tokens"], composed_x_tokens],
+                    context_states=[region_state["text_tokens"], global_x_tokens],
                     context_freqs_cis=[region_condition["freqs"], region_x_freqs],
                     adaln_input=adaln_input,
                     include_query_in_kv=True,
@@ -785,7 +786,7 @@ def run_layerbind_forward(
                 region_state["text_tokens"] = layer.contextual_forward(
                     region_state["text_tokens"],
                     region_condition["freqs"],
-                    context_states=[local_tokens, cap_tokens_current],
+                    context_states=[region_tokens, cap_tokens_current],
                     context_freqs_cis=[region_freqs, cap_freqs_current],
                     adaln_input=adaln_input,
                     include_query_in_kv=True,
