@@ -311,6 +311,7 @@ def prepare_region_runtime_states(layout, x_seq_len: int, device: torch.device):
         if indices.numel() > 0:
             keep_mask[indices] = False
         background_indices = all_indices[keep_mask]
+        region_mask = torch.ones((1, indices.numel(), 1), device=device, dtype=torch.float32)
         states.append(
             {
                 "layer_index": region.layer_index,
@@ -321,6 +322,7 @@ def prepare_region_runtime_states(layout, x_seq_len: int, device: torch.device):
                 "branch_patches": None,
                 "branch_tokens": None,
                 "text_tokens": None,
+                "region_mask": region_mask,
                 "alpha_mask": None,
             }
         )
@@ -524,7 +526,7 @@ def blend_region_tokens(
         current = blended.index_select(1, indices)
         if blend_mode == "direct" or order == 0:
             update = branch_tokens
-            region_state["alpha_mask"] = torch.ones_like(branch_tokens[:, :, :1])
+            region_state["alpha_mask"] = None
         else:
             alpha_mask = zimage_layerbind_utils.estimate_alpha_from_token_difference(
                 branch_tokens,
@@ -533,10 +535,9 @@ def blend_region_tokens(
                 token_shape=token_shape,
                 gamma=gamma,
                 poisson_lambda=poisson_lambda,
-                beta=beta,
             )
             region_state["alpha_mask"] = alpha_mask
-            update = current + alpha_mask * (branch_tokens - current)
+            update = alpha_mask * branch_tokens + (1.0 - alpha_mask) * current
 
         blended.index_copy_(1, indices, update)
     return blended
@@ -547,12 +548,26 @@ def compose_phase2_region_tokens(
     local_tokens: torch.Tensor,
     indices: torch.Tensor,
     beta: float,
+    region_mask: Optional[torch.Tensor] = None,
 ):
     if local_tokens is None or indices.numel() == 0:
         return x_tokens
 
     current = x_tokens.index_select(1, indices)
-    update = current.lerp(local_tokens, float(beta))
+    if region_mask is not None and region_mask.shape[1] == current.shape[1]:
+        # Layer transparency scheduler: alpha_o = beta * M.
+        mask = region_mask.to(dtype=current.dtype)
+        if mask.shape[0] == 1 and current.shape[0] > 1:
+            mask = mask.expand(current.shape[0], -1, -1)
+        if mask.shape[0] != current.shape[0]:
+            mask = None
+    else:
+        mask = None
+
+    if mask is not None:
+        update = current + (float(beta) * mask) * (local_tokens - current)
+    else:
+        update = current.lerp(local_tokens, float(beta))
     composed = x_tokens.clone()
     composed.index_copy_(1, indices, update)
     return composed
@@ -792,12 +807,12 @@ def run_layerbind_forward(
                     include_query_in_kv=True,
                 )
                 region_state["branch_tokens"] = local_tokens
-                region_state["alpha_mask"] = None
                 composed_x_tokens = compose_phase2_region_tokens(
                     composed_x_tokens,
                     local_tokens,
                     region_state["indices"],
-                    beta * float(phase2_beta_scale),
+                    beta,
+                    region_mask=region_state.get("region_mask"),
                 )
             x_tokens = composed_x_tokens
 

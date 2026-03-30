@@ -298,7 +298,6 @@ def estimate_alpha_from_token_difference(
     token_shape: tuple[int, int, int],
     gamma: float = 0.90,
     poisson_lambda: float = 0.50,
-    beta: float = 1.0,
 ) -> torch.Tensor:
     if branch_tokens.shape != current_tokens.shape:
         raise ValueError(
@@ -308,21 +307,33 @@ def estimate_alpha_from_token_difference(
         raise ValueError(f"expected token tensors of shape [B, N, D], got {tuple(branch_tokens.shape)}")
 
     diff = torch.linalg.vector_norm(branch_tokens - current_tokens, dim=-1)
-    median = diff.median(dim=1, keepdim=True).values
-    mad = (diff - median).abs().median(dim=1, keepdim=True).values
-    sigma_bg = (1.4826 * mad).clamp(min=1e-5)
-    score = (diff / sigma_bg).pow(float(gamma))
-
-    score_map = _scatter_token_values(score, token_indices, token_shape)
+    diff_map = _scatter_token_values(diff, token_indices, token_shape)
     region_mask = _scatter_token_mask(token_indices, token_shape, branch_tokens.device)
-    score_map = score_map * region_mask
+    ring_mask = (region_mask - _binary_erode(region_mask, iterations=1)).clamp(min=0.0)
+    if ring_mask.max().item() <= 0:
+        ring_mask = region_mask
+
+    score_map = torch.zeros_like(diff_map)
+    flat_region_mask = region_mask.view(-1).bool()
+    flat_ring_mask = ring_mask.view(-1).bool()
+    for batch_index in range(diff_map.shape[0]):
+        flat_diff = diff_map[batch_index].view(-1)
+        bg_values = flat_diff[flat_ring_mask]
+        if bg_values.numel() == 0:
+            bg_values = flat_diff[flat_region_mask]
+        if bg_values.numel() == 0:
+            continue
+
+        median = bg_values.median()
+        mad = (bg_values - median).abs().median()
+        sigma_bg = (1.4826 * mad).clamp(min=1e-5)
+        score_map[batch_index : batch_index + 1] = ((diff_map[batch_index : batch_index + 1] / sigma_bg).pow(float(2.0 * gamma))) * region_mask
 
     alpha_map = _screened_poisson_smooth(score_map, poisson_lambda=poisson_lambda)
     alpha_map = alpha_map * region_mask
 
     alpha_tokens = []
     flat_alpha = alpha_map.view(alpha_map.shape[0], -1)
-    flat_region_mask = region_mask.view(-1).bool()
     for batch_index in range(alpha_map.shape[0]):
         region_values = flat_alpha[batch_index][flat_region_mask]
         threshold = _otsu_threshold(region_values)
@@ -336,7 +347,7 @@ def estimate_alpha_from_token_difference(
 
     alpha = torch.stack(alpha_tokens, dim=0).to(dtype=branch_tokens.dtype, device=branch_tokens.device)
     alpha = alpha.clamp_(0.0, 1.0).unsqueeze(-1)
-    return alpha * float(beta)
+    return alpha
 
 
 def populate_region_token_indices(

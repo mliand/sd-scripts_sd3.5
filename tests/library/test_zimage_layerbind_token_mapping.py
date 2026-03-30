@@ -77,7 +77,6 @@ def test_estimate_alpha_from_token_difference_highlights_changed_tokens():
         token_shape=(1, 2, 2),
         gamma=0.9,
         poisson_lambda=0.5,
-        beta=1.0,
     )
 
     assert alpha.shape == (1, 2, 1)
