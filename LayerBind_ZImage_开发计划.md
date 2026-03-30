@@ -560,6 +560,10 @@
   - [tests/library/test_zimage_model_layerbind.py](/home/coco/workspace/sd-scripts_sd3.5/tests/library/test_zimage_model_layerbind.py)
   - [tests/test_zimage_minimal_inference_layerbind.py](/home/coco/workspace/sd-scripts_sd3.5/tests/test_zimage_minimal_inference_layerbind.py)
   - [tests/test_zimage_minimal_inference_layerbind_smoke.py](/home/coco/workspace/sd-scripts_sd3.5/tests/test_zimage_minimal_inference_layerbind_smoke.py)
+- 已修复一处真实环境运行时问题：
+  - `LayerBind` 预计算 caption tokens 时，padding 分支会把 `bf16` token 意外提升为 `float32`
+  - 该问题会在 `context_refiner` 的 `to_q` 线性层触发 dtype mismatch
+  - 当前已在 [library/zimage_model.py](/home/coco/workspace/sd-scripts_sd3.5/library/zimage_model.py) 修复 dtype 保持逻辑，并在 [zimage_minimal_inference.py](/home/coco/workspace/sd-scripts_sd3.5/zimage_minimal_inference.py) 里将 LayerBind 条件预计算放入 `autocast + no_grad`
 
 ### 15.2 本轮未完成
 
@@ -578,6 +582,7 @@
   - 当前可见环境中，`base` 没有 `torch`
   - `sd_train` 环境同时缺少 `torch` 与 `pytest`
   - 因此当前只能完成静态检查，无法在本机现状下执行新增 PyTorch 测试
+- 已根据另一台实机的首轮回归结果修复 `bf16` caption token 预计算崩溃，但尚未在本机完成二次运行验证
 
 ### 15.4 下一步建议
 

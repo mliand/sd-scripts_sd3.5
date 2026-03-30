@@ -1062,7 +1062,7 @@ class ZImageTransformer2DModel(nn.Module):
         if cap_mask is not None:
             cap_pad_mask = ~cap_mask
             cap_feats = cap_feats.masked_fill(cap_pad_mask.unsqueeze(-1), 0.0)
-            cap_feats = cap_feats + self.cap_pad_token * cap_pad_mask.unsqueeze(-1).float()
+            cap_feats = cap_feats + self.cap_pad_token * cap_pad_mask.unsqueeze(-1).to(dtype=cap_feats.dtype)
 
         cap_pos_ids = self.create_caption_position_ids(cap_seq_len, device)
         cap_freqs_cis = self.rope_embedder(cap_pos_ids)

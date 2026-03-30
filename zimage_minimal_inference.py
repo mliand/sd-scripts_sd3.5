@@ -573,20 +573,21 @@ def generate_image(
     save_intermediates = bool(prompt_dict.get("layerbind_save_intermediates", False))
     intermediate_dir = None
     if use_layerbind:
-        layerbind_conditions = prepare_layerbind_conditions(
-            transformer,
-            tokenize_strategy,
-            encoding_strategy,
-            text_encoder,
-            prompt,
-            negative_prompt,
-            layerbind_layout,
-            width,
-            height,
-            device,
-            dtype,
-            do_cfg,
-        )
+        with torch.autocast(device_type=device.type, dtype=dtype), torch.no_grad():
+            layerbind_conditions = prepare_layerbind_conditions(
+                transformer,
+                tokenize_strategy,
+                encoding_strategy,
+                text_encoder,
+                prompt,
+                negative_prompt,
+                layerbind_layout,
+                width,
+                height,
+                device,
+                dtype,
+                do_cfg,
+            )
         prompt_embeds = layerbind_conditions["scene"]["embeds"]
         prompt_mask = layerbind_conditions["scene"]["mask"]
         if do_cfg and layerbind_conditions["negative"] is not None:

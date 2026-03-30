@@ -89,3 +89,14 @@ def test_helper_path_matches_forward():
     helper = model.finalize_image_tokens(unified, adaln_input, meta["image_shape"], patch_size=2, f_patch_size=1)
 
     torch.testing.assert_close(direct, helper)
+
+
+def test_prepare_caption_tokens_keeps_model_dtype_when_padding_is_present():
+    model = create_tiny_zimage_model().to(dtype=torch.bfloat16)
+    cap_feats = torch.randn(1, 3, 12, dtype=torch.bfloat16)
+    cap_mask = torch.tensor([[True, True, False]])
+
+    cap_tokens, cap_freqs_cis = model.prepare_caption_tokens(cap_feats, cap_mask, apply_context_refiner=False)
+
+    assert cap_tokens.dtype == torch.bfloat16
+    assert cap_freqs_cis.dtype == torch.bfloat16
