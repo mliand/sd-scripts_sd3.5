@@ -1,7 +1,33 @@
 import json
 from argparse import Namespace
 
+import torch
+
 import zimage_minimal_inference
+from library.zimage_model import ZImageTransformer2DModel
+
+
+def create_tiny_zimage_model():
+    model = ZImageTransformer2DModel(
+        all_patch_size=(2,),
+        all_f_patch_size=(1,),
+        in_channels=16,
+        dim=32,
+        n_layers=2,
+        n_refiner_layers=1,
+        n_heads=4,
+        n_kv_heads=4,
+        norm_eps=1e-5,
+        qk_norm=False,
+        cap_feat_dim=12,
+        axes_dims=[2, 2, 4],
+        axes_lens=[32, 8, 8],
+        attn_mode="torch",
+        split_attn=False,
+        gate_type="none",
+    )
+    model.eval()
+    return model
 
 
 def test_parse_layer_spec_supports_ranges_and_single_values():
@@ -106,3 +132,85 @@ def test_create_image_freqs_for_caption_length_matches_requested_offset():
 
     assert freqs.shape == (1, 2, 3)
     assert freqs[0, 0, 0].item() == 6.0
+
+
+def test_phase1_branch_state_evolves_independently_from_current_global_patches():
+    transformer = create_tiny_zimage_model()
+    device = torch.device("cpu")
+    cap_mask = torch.tensor([[True, True, True]], device=device)
+    cap_feats = torch.randn(1, 3, 12, device=device)
+    scene_tokens, scene_freqs = transformer.prepare_caption_tokens(cap_feats, cap_mask, apply_context_refiner=False)
+    region_tokens, region_freqs = transformer.prepare_caption_tokens(cap_feats, cap_mask, apply_context_refiner=False)
+
+    scene_condition = {"tokens": scene_tokens.clone(), "mask": cap_mask, "freqs": scene_freqs}
+    background_condition = {"tokens": scene_tokens.clone(), "mask": cap_mask, "freqs": scene_freqs}
+    region_conditions = [{"tokens": region_tokens.clone(), "freqs": region_freqs}]
+    region_states = [
+        {
+            "layer_index": 1,
+            "bbox": (0, 0, 16, 16),
+            "prompt": "object",
+            "indices": torch.tensor([0], device=device),
+            "background_indices": torch.tensor([1, 2, 3], device=device),
+            "branch_patches": None,
+            "branch_tokens": None,
+            "text_tokens": None,
+            "alpha_mask": None,
+        }
+    ]
+
+    sigmas = torch.tensor([1.0, 0.5, 0.0], device=device)
+    latent_a = torch.randn(1, 16, 1, 4, 4, device=device)
+    latent_b = torch.randn(1, 16, 1, 4, 4, device=device)
+
+    zimage_minimal_inference.run_layerbind_forward(
+        transformer,
+        latent_a,
+        torch.tensor([0.5], device=device),
+        sigmas,
+        0,
+        scene_condition,
+        background_condition,
+        region_conditions,
+        region_states,
+        phase="phase1",
+        hard_binding_layers=[0],
+        beta=0.7,
+        blend_mode="alpha",
+        gamma=0.9,
+        poisson_lambda=0.5,
+        phase2_beta_scale=0.35,
+        phase2_delta_scale=0.5,
+        phase2_branch_context_scale=0.6,
+        apply_phase1_blend=False,
+    )
+    first_branch_patches = region_states[0]["branch_patches"].clone()
+
+    zimage_minimal_inference.run_layerbind_forward(
+        transformer,
+        latent_b,
+        torch.tensor([0.25], device=device),
+        sigmas,
+        1,
+        scene_condition,
+        background_condition,
+        region_conditions,
+        region_states,
+        phase="phase1",
+        hard_binding_layers=[0],
+        beta=0.7,
+        blend_mode="alpha",
+        gamma=0.9,
+        poisson_lambda=0.5,
+        phase2_beta_scale=0.35,
+        phase2_delta_scale=0.5,
+        phase2_branch_context_scale=0.6,
+        apply_phase1_blend=False,
+    )
+
+    second_branch_patches = region_states[0]["branch_patches"]
+    current_global_region = transformer.patchify(latent_b, 2, 1).index_select(1, region_states[0]["indices"])
+
+    assert second_branch_patches.shape == current_global_region.shape
+    assert not torch.allclose(first_branch_patches, second_branch_patches)
+    assert not torch.allclose(second_branch_patches, current_global_region)

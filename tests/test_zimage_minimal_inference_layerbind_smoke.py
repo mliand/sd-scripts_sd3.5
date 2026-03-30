@@ -129,6 +129,8 @@ def test_generate_image_only_blends_phase1_at_t1(monkeypatch, tmp_path):
         transformer,
         latent_model_input,
         timestep,
+        sigmas,
+        step_index,
         scene_condition,
         background_condition,
         region_conditions,

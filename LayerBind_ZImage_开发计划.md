@@ -560,13 +560,14 @@
   - [tests/library/test_zimage_model_layerbind.py](/home/coco/workspace/sd-scripts_sd3.5/tests/library/test_zimage_model_layerbind.py)
   - [tests/test_zimage_minimal_inference_layerbind.py](/home/coco/workspace/sd-scripts_sd3.5/tests/test_zimage_minimal_inference_layerbind.py)
   - [tests/test_zimage_minimal_inference_layerbind_smoke.py](/home/coco/workspace/sd-scripts_sd3.5/tests/test_zimage_minimal_inference_layerbind_smoke.py)
+  - 其中 [tests/test_zimage_minimal_inference_layerbind.py](/home/coco/workspace/sd-scripts_sd3.5/tests/test_zimage_minimal_inference_layerbind.py) 已补一条回归测试，专门约束 `Phase 1` branch 不能再退回“每步直接跟随当前全局 region patch”的伪 branch 实现
 - 已修复一处真实环境运行时问题：
   - `LayerBind` 预计算 caption tokens 时，padding 分支会把 `bf16` token 意外提升为 `float32`
   - 该问题会在 `context_refiner` 的 `to_q` 线性层触发 dtype mismatch
   - 当前已在 [library/zimage_model.py](/home/coco/workspace/sd-scripts_sd3.5/library/zimage_model.py) 修复 dtype 保持逻辑，并在 [zimage_minimal_inference.py](/home/coco/workspace/sd-scripts_sd3.5/zimage_minimal_inference.py) 里将 LayerBind 条件预计算放入 `autocast + no_grad`
 - 已修复两处首轮实机质量问题：
-  - `region_states` 不再跨 timestep 复用，避免 branch token 在扩散步之间累积漂移
-  - 重叠 bbox 的 token ownership 改为按 `layer_index` 去重，前景 region 优先占有 overlap token
+  - `Phase 1` branch 状态已从“跨 timestep 持久 token cache”改为“持久 branch patch latents + 每步 residual 更新”的轨迹实现，避免 branch 在早期扩散步里脱离 ODE 采样路径
+  - 重叠 bbox 的 token ownership 不再做预裁剪，overlap token 会完整保留到 compositing 阶段处理
 - 已根据论文 4.3 / 4.4 / 4.5 回调实现方向：
   - 不再用“删除 Eq.5/6 与 Reverse Adaptation”来换取稳定性
   - 当前工作树已恢复 `branch/text` 的双向更新、`Hard Binding`、`Reverse Adaptation`
@@ -592,15 +593,14 @@
   - 重叠 token 不再在预处理阶段裁掉，而是完整保留到 compositing 阶段处理
   - `Phase 2` 已从“复用 Phase 1 的 diff-alpha 融合”改为固定 `beta * region mask` 的顺序 compositing
   - 默认 `hard_binding_layers` 已从保守 4 层改回更接近论文 SD3.5 文本主导层密度的 9 层映射
-  - `Phase 1` 仍是 token-space branch 的近似实现，但现在会在每个 timestep 开始时回锚到当前全局区域 token，以减少 branch 与全局 latent 轨迹脱节
+  - `Phase 1` 已不再在每个 timestep 开始时回锚到当前全局区域 token；当前会在首次进入 `Phase 1` 时从全局 latent patch 拷贝 branch seed，并在后续 timestep 中通过独立 branch residual 执行局部 ODE 更新
 
 ### 15.2 本轮未完成
 
 - `M7` 的 attention 统计式 layer search 尚未实现
 - 当前 `hard binding layers` 是基于 FLUX 层分布映射到 30 层的启发式默认值，不是实测统计值
-- `alpha blending` 已有简化版 mask-level beta 融合，但尚未接入论文中的 poisson / otsu / morphology 流程
 - 当前版本已接入 `Phase 1/2`，但还没有在真实权重环境上做过视觉质量调参
-- 当前跨 timestep 保留的是 token-space branch state，而非完整 latent-space ODE branch 轨迹；这比“每步重置 branch”更接近论文，但仍属于第一版近似实现
+- 当前 `Phase 1` branch 已具备 patch-latent 级别的跨 timestep ODE 轨迹，但仍是“局部 branch patch”表示，不是维护一份完整全图 latent 副本的实现
 
 ### 15.3 当前验证状态
 
@@ -608,6 +608,7 @@
   - `python -m py_compile ...`
 - 已通过代码层面静态接线检查：
   - 原始推理入口、样例 JSON、smoke 脚本都已写入仓库
+  - `Phase 1` branch 轨迹的新增回归测试也已写入测试文件
 - 运行时 `pytest` 尚未完成：
   - 当前可见环境中，`base` 没有 `torch`
   - `sd_train` 环境同时缺少 `torch` 与 `pytest`

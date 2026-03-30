@@ -288,6 +288,7 @@ def prepare_region_runtime_states(layout, x_seq_len: int, device: torch.device):
                 "prompt": region.region_prompt,
                 "indices": indices,
                 "background_indices": background_indices,
+                "branch_patches": None,
                 "branch_tokens": None,
                 "text_tokens": None,
                 "alpha_mask": None,
@@ -308,6 +309,37 @@ def create_image_freqs_for_caption_length(
     )
     freqs_cis = transformer.rope_embedder(position_ids)
     return freqs_cis.unsqueeze(0).expand(batch_size, -1, -1)
+
+
+def prepare_branch_image_tokens(
+    transformer,
+    branch_patches: torch.Tensor,
+    branch_freqs: torch.Tensor,
+    adaln_input: torch.Tensor,
+    patch_size: int,
+    f_patch_size: int,
+):
+    embedder = transformer.all_x_embedder[f"{patch_size}-{f_patch_size}"]
+    branch_tokens = embedder(branch_patches.to(dtype=embedder.weight.dtype))
+    adaln_input = adaln_input.type_as(branch_tokens)
+
+    if len(transformer.noise_refiner) > 0:
+        noise_refiner_attn_params = transformer.create_main_attention_params(0, None)
+        for layer in transformer.noise_refiner:
+            branch_tokens = layer(branch_tokens, branch_freqs, adaln_input, attn_params=noise_refiner_attn_params)
+
+    return branch_tokens
+
+
+def predict_branch_patch_residual(
+    transformer,
+    branch_tokens: torch.Tensor,
+    adaln_input: torch.Tensor,
+    patch_size: int,
+    f_patch_size: int,
+):
+    final_layer = transformer.all_final_layer[f"{patch_size}-{f_patch_size}"]
+    return final_layer(branch_tokens, adaln_input.type_as(branch_tokens))
 
 
 def blend_region_tokens(
@@ -377,6 +409,8 @@ def run_layerbind_forward(
     transformer,
     latent_model_input: torch.Tensor,
     timestep: torch.Tensor,
+    sigmas: torch.Tensor,
+    step_index: int,
     scene_condition: dict[str, Any],
     background_condition: dict[str, Any],
     region_conditions: list[dict[str, Any]],
@@ -407,6 +441,9 @@ def run_layerbind_forward(
         adaln_input=adaln_input,
     )
     adaln_input = adaln_input.type_as(x_tokens)
+    image_patches = None
+    if phase == "phase1":
+        image_patches = transformer.patchify(latent_model_input.to(torch.float32), x_meta["patch_size"], x_meta["f_patch_size"])
 
     cap_tokens_current = cap_tokens.clone()
     cap_freqs_current = cap_freqs
@@ -424,12 +461,19 @@ def run_layerbind_forward(
                 batch_size=x_tokens.shape[0],
                 device=x_tokens.device,
             )
-            branch_query, _ = transformer.select_token_subset(x_tokens, region_state["indices"], region_x_freqs)
-            if region_state["branch_tokens"] is None:
-                region_state["branch_tokens"] = branch_query.clone()
-            else:
-                # Re-anchor the persistent branch to the current latent trajectory while keeping its instance memory.
-                region_state["branch_tokens"] = branch_query.lerp(region_state["branch_tokens"], 0.75)
+            branch_seed = image_patches.index_select(1, region_state["indices"])
+            branch_freqs = region_x_freqs.index_select(1, region_state["indices"])
+            if region_state["branch_patches"] is None or region_state["branch_patches"].shape != branch_seed.shape:
+                # Phase 1 starts from the same latent noise patches as the global path, then evolves independently.
+                region_state["branch_patches"] = branch_seed.clone()
+            region_state["branch_tokens"] = prepare_branch_image_tokens(
+                transformer,
+                region_state["branch_patches"],
+                branch_freqs,
+                adaln_input,
+                patch_size=x_meta["patch_size"],
+                f_patch_size=x_meta["f_patch_size"],
+            )
             if region_state["text_tokens"] is None:
                 region_state["text_tokens"] = region_condition["tokens"].clone()
 
@@ -560,6 +604,25 @@ def run_layerbind_forward(
             gamma=gamma,
             poisson_lambda=poisson_lambda,
         )
+    elif phase == "phase1" and sigmas is not None:
+        for region_state in region_states:
+            branch_tokens = region_state.get("branch_tokens")
+            branch_patches = region_state.get("branch_patches")
+            if branch_tokens is None or branch_patches is None:
+                continue
+            branch_patch_residual = predict_branch_patch_residual(
+                transformer,
+                branch_tokens,
+                adaln_input,
+                patch_size=x_meta["patch_size"],
+                f_patch_size=x_meta["f_patch_size"],
+            )
+            region_state["branch_patches"] = zimage_train_utils._step(
+                (-branch_patch_residual).to(torch.float32),
+                branch_patches.to(torch.float32),
+                sigmas,
+                step_index,
+            )
 
     unified, _ = transformer.build_unified_tokens(x_tokens, x_freqs_cis, cap_tokens_current, cap_freqs_current)
     return transformer.finalize_image_tokens(
@@ -738,6 +801,8 @@ def generate_image(
                     transformer,
                     latent_model_input,
                     timestep,
+                    sigmas,
+                    i,
                     layerbind_conditions["scene"],
                     layerbind_conditions["background"],
                     layerbind_conditions["regions"],
