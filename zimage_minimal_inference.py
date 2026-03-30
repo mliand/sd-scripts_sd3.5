@@ -130,12 +130,12 @@ def build_prompts(args: argparse.Namespace):
 
 
 def get_default_layerbind_hard_binding_layers(num_layers: int) -> list[int]:
-    # Use a conservative subset of the FLUX text-dominant layers to avoid over-binding on Z-Image.
-    flux_reference = [0, 18, 45, 54]
-    flux_max_index = 54
+    # Map the SD3.5 text-dominant layers onto the current model depth.
+    sd35_reference = [0, 11, 14, 19, 21, 24, 29, 32, 34]
+    sd35_max_index = 34
     mapped = {
-        min(num_layers - 1, round(reference / flux_max_index * max(num_layers - 1, 1)))
-        for reference in flux_reference
+        min(num_layers - 1, round(reference / sd35_max_index * max(num_layers - 1, 1)))
+        for reference in sd35_reference
     }
     return sorted(mapped)
 
@@ -348,6 +348,23 @@ def blend_region_tokens(
     return blended
 
 
+def compose_phase2_region_tokens(
+    x_tokens: torch.Tensor,
+    region_state: dict[str, Any],
+    beta: float,
+):
+    branch_tokens = region_state.get("branch_tokens")
+    indices = region_state["indices"]
+    if branch_tokens is None or indices.numel() == 0:
+        return x_tokens
+
+    current = x_tokens.index_select(1, indices)
+    update = current.lerp(branch_tokens, float(beta))
+    composed = x_tokens.clone()
+    composed.index_copy_(1, indices, update)
+    return composed
+
+
 def save_debug_image(vae, latents: torch.Tensor, file_path: str):
     latents = latents.to(vae.dtype)
     latents = zimage_train_utils._unscale_latents(latents, vae)
@@ -407,9 +424,12 @@ def run_layerbind_forward(
                 batch_size=x_tokens.shape[0],
                 device=x_tokens.device,
             )
+            branch_query, _ = transformer.select_token_subset(x_tokens, region_state["indices"], region_x_freqs)
             if region_state["branch_tokens"] is None:
-                branch_query, _ = transformer.select_token_subset(x_tokens, region_state["indices"], region_x_freqs)
                 region_state["branch_tokens"] = branch_query.clone()
+            else:
+                # Re-anchor the persistent branch to the current latent trajectory while keeping its instance memory.
+                region_state["branch_tokens"] = branch_query.lerp(region_state["branch_tokens"], 0.75)
             if region_state["text_tokens"] is None:
                 region_state["text_tokens"] = region_condition["tokens"].clone()
 
@@ -498,9 +518,6 @@ def run_layerbind_forward(
                 region_tokens, region_freqs = transformer.select_token_subset(
                     composed_x_tokens, region_state["indices"], region_x_freqs
                 )
-                background_tokens, background_freqs = transformer.select_token_subset(
-                    composed_x_tokens, region_state["background_indices"], region_x_freqs
-                )
                 if region_state["text_tokens"] is None:
                     region_state["text_tokens"] = region_condition["tokens"].clone()
                 branch_prior = region_state.get("branch_tokens")
@@ -526,14 +543,10 @@ def run_layerbind_forward(
                 )
                 region_state["branch_tokens"] = local_tokens
                 region_state["alpha_mask"] = None
-                composed_x_tokens = blend_region_tokens(
+                composed_x_tokens = compose_phase2_region_tokens(
                     composed_x_tokens,
-                    [region_state],
+                    region_state,
                     beta * float(phase2_beta_scale),
-                    blend_mode,
-                    token_shape=x_meta["token_shape"],
-                    gamma=gamma,
-                    poisson_lambda=poisson_lambda,
                 )
             x_tokens = composed_x_tokens
 

@@ -8,7 +8,7 @@
     "phase2_beta_scale": 0.30,
     "phase2_delta_scale": 0.45,
     "phase2_branch_context_scale": 0.55,
-    "hard_binding_layers": [0, 10, 24, 29]
+    "hard_binding_layers": [0, 9, 12, 16, 18, 20, 25, 27, 29]
   },
   "regions": [
     {

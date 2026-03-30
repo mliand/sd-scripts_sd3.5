@@ -346,12 +346,8 @@ def populate_region_token_indices(
     vae_scale_factor: int = zimage_config.ZIMAGE_VAE_SCALE_FACTOR,
     patch_size: int = zimage_config.DEFAULT_TRANSFORMER_PATCH_SIZE[0],
 ) -> LayerBindLayout:
-    sorted_regions = sorted(layout.regions, key=lambda item: item.layer_index)
-    occupied_indices: set[int] = set()
     populated_regions = []
-
-    # Front-most regions keep overlapping tokens; back regions lose the overlap.
-    for region in reversed(sorted_regions):
+    for region in layout.regions:
         token_indices = bbox_to_token_indices(
             region.bbox,
             image_width=image_width,
@@ -359,8 +355,6 @@ def populate_region_token_indices(
             vae_scale_factor=vae_scale_factor,
             patch_size=patch_size,
         )
-        token_indices = [index for index in token_indices if index not in occupied_indices]
-        occupied_indices.update(token_indices)
         populated_regions.append(
             RegionLayer(
                 region_prompt=region.region_prompt,

@@ -588,6 +588,11 @@
   - `Phase 2` 已显式接回 `Phase 1` 的 `branch_tokens` 作为 branch 语义上下文，而不是只依赖当前全局区域 token
   - 新增 `phase2_branch_context_scale` 配置，用于控制 `Phase 1` 语义记忆在 `Phase 2` 中的注入力度
   - 样例配置的 `eta1` 已上调到 `0.25`，更接近论文在 SD3.5 路线上的早期绑定时长
+- 已继续按论文对齐 `Phase 1 / Phase 2` 的剩余偏差：
+  - 重叠 token 不再在预处理阶段裁掉，而是完整保留到 compositing 阶段处理
+  - `Phase 2` 已从“复用 Phase 1 的 diff-alpha 融合”改为固定 `beta * region mask` 的顺序 compositing
+  - 默认 `hard_binding_layers` 已从保守 4 层改回更接近论文 SD3.5 文本主导层密度的 9 层映射
+  - `Phase 1` 仍是 token-space branch 的近似实现，但现在会在每个 timestep 开始时回锚到当前全局区域 token，以减少 branch 与全局 latent 轨迹脱节
 
 ### 15.2 本轮未完成
 
