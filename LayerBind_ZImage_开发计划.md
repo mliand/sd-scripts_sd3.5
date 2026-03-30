@@ -599,10 +599,11 @@
   - 在 [zimage_minimal_inference.py](/home/coco/workspace/sd-scripts_sd3.5/zimage_minimal_inference.py) 中新增 `--layerbind_collect_layer_stats`、`--layerbind_layer_stats_path`、`--layerbind_layer_stats_top_k`
   - 统计结果会在一次正常 LayerBind 推理后输出 JSON，并给出一版 `suggested_hard_binding_layers`
   - 当前统计逻辑记录的是 `Phase 1` 每一层中 branch 对标准 `background + region text` 上下文的响应强度，用于逼近论文里“文本主导层”筛选标准
+  - 基于当前一轮 `1024x1024` 实测，默认 `hard_binding_layers` 已从启发式映射切换为 Z-Image 30 层实测列表：`[0, 15, 16, 18, 19, 20, 27, 28, 29]`
 
 ### 15.2 本轮未完成
 
-- 当前 `hard binding layers` 默认值仍是基于 FLUX 层分布映射到 30 层的启发式结果；虽然已经支持导出 Z-Image 自身的 layer-search JSON，但还没有在真实权重环境上正式跑出一版稳定的实测层列表
+- 当前默认 `hard binding layers` 已切到第一版 Z-Image 实测层列表，但还没有在更多 prompt / seed / layout 组合上完成稳定性验证
 - 当前版本已接入 `Phase 1/2`，但还没有在真实权重环境上做过视觉质量调参
 - 当前 `Phase 1` branch 已具备 patch-latent 级别的跨 timestep ODE 轨迹，但仍是“局部 branch patch”表示，不是维护一份完整全图 latent 副本的实现
 
@@ -629,6 +630,6 @@
 - 在真实模型环境上新增一轮 `M7` 实测：
   - 运行带 `--layerbind_collect_layer_stats` 的正常推理
   - 检查生成的 `layer_stats.json` 中 `text_minus_background` 排名与 `suggested_hard_binding_layers`
-  - 若结果稳定，再把默认 `hard_binding_layers` 从启发式映射切到实测列表
+  - 若后续更多 case 稳定，再确认是否继续固定当前默认值，或按更多样本重估
 - 推荐测试命令：
   - `python zimage_minimal_inference.py ... --layerbind_layout ./examples/layerbind_layout_example.json --layerbind_collect_layer_stats --layerbind_layer_stats_path outputs/layerbind_test/layer_stats.json --bf16`

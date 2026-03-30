@@ -154,12 +154,17 @@ def build_prompts(args: argparse.Namespace):
 
 
 def get_default_layerbind_hard_binding_layers(num_layers: int) -> list[int]:
-    # Map the SD3.5 text-dominant layers onto the current model depth.
-    sd35_reference = [0, 11, 14, 19, 21, 24, 29, 32, 34]
-    sd35_max_index = 34
+    # Prefer the Z-Image 30-layer empirical layer-search result when depth matches the base model.
+    zimage_reference = [0, 15, 16, 18, 19, 20, 27, 28, 29]
+    if num_layers <= 0:
+        return []
+    if num_layers == 30:
+        return zimage_reference
+
+    zimage_max_index = 29
     mapped = {
-        min(num_layers - 1, round(reference / sd35_max_index * max(num_layers - 1, 1)))
-        for reference in sd35_reference
+        min(num_layers - 1, round(reference / zimage_max_index * max(num_layers - 1, 1)))
+        for reference in zimage_reference
     }
     return sorted(mapped)
 
