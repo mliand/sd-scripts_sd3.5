@@ -9,6 +9,7 @@ import time
 from typing import Any, Optional
 
 import torch
+from PIL import Image, ImageDraw
 
 from library import strategy_zimage, train_util, zimage_layerbind_utils, zimage_utils
 from library.device_utils import init_ipex, get_preferred_device
@@ -566,6 +567,42 @@ def save_debug_image(vae, latents: torch.Tensor, file_path: str):
     image.save(file_path)
 
 
+def save_boxed_debug_image(image: Image.Image, layout, file_path: str):
+    boxed = image.copy()
+    draw = ImageDraw.Draw(boxed)
+    palette = [
+        (255, 64, 64),
+        (64, 192, 255),
+        (64, 220, 96),
+        (255, 176, 64),
+        (192, 96, 255),
+    ]
+
+    for index, region in enumerate(layout.regions):
+        color = palette[index % len(palette)]
+        x1, y1, x2, y2 = region.bbox
+        draw.rectangle((x1, y1, x2, y2), outline=color, width=4)
+        label = f"{region.layer_index}:{region.region_prompt}"
+        draw.text((x1 + 6, max(0, y1 + 6)), label, fill=color)
+
+    boxed.save(file_path)
+
+
+def get_layerbind_debug_save_points(sample_steps: int, percents: tuple[int, ...] = (10, 30, 60, 80)) -> list[tuple[int, int]]:
+    if sample_steps <= 0:
+        return []
+
+    save_points = []
+    for percent in percents:
+        step = min(sample_steps, max(1, math.ceil(sample_steps * (percent / 100.0))))
+        save_points.append((step, percent))
+
+    deduped = {}
+    for step, percent in save_points:
+        deduped.setdefault(step, percent)
+    return sorted((step, percent) for step, percent in deduped.items())
+
+
 def run_layerbind_forward(
     transformer,
     latent_model_input: torch.Tensor,
@@ -922,6 +959,7 @@ def generate_image(
     blend_mode = prompt_dict.get("layerbind_blend_mode", "alpha")
     save_intermediates = bool(prompt_dict.get("layerbind_save_intermediates", False))
     intermediate_dir = None
+    debug_save_points = []
     layer_stats_accumulator = None
     if use_layerbind:
         with torch.autocast(device_type=device.type, dtype=dtype), torch.no_grad():
@@ -959,6 +997,7 @@ def generate_image(
         if save_intermediates:
             intermediate_dir = os.path.join(output_dir, "layerbind_debug")
             os.makedirs(intermediate_dir, exist_ok=True)
+            debug_save_points = get_layerbind_debug_save_points(sample_steps)
 
     with torch.autocast(device_type=device.type, dtype=dtype), torch.no_grad():
         region_states = None
@@ -1009,12 +1048,19 @@ def generate_image(
             noise_pred = -noise_pred.squeeze(2)
             latents = zimage_train_utils._step(noise_pred.to(torch.float32), latents, sigmas, i)
 
-            if save_intermediates and intermediate_dir is not None and t1_step > 0 and (i + 1) == t1_step:
-                save_debug_image(
-                    vae,
-                    latents,
-                    os.path.join(intermediate_dir, f"{output_name or 'layerbind'}_t1_step_{i+1:02d}.png"),
-                )
+            if save_intermediates and intermediate_dir is not None:
+                step_number = i + 1
+                for save_step, save_percent in debug_save_points:
+                    if step_number == save_step:
+                        save_debug_image(
+                            vae,
+                            latents,
+                            os.path.join(
+                                intermediate_dir,
+                                f"{output_name or 'layerbind'}_{save_percent:02d}pct_step_{step_number:02d}.png",
+                            ),
+                        )
+                        break
 
         latents = latents.to(vae.dtype)
         latents = zimage_train_utils._unscale_latents(latents, vae)
@@ -1028,6 +1074,12 @@ def generate_image(
     index = prompt_dict.get("enum", 0)
     filename = f"{'' if output_name is None else output_name + '_'}{num_suffix}_{index:02d}_{ts_str}{seed_suffix}.png"
     image.save(os.path.join(output_dir, filename))
+    if save_intermediates and intermediate_dir is not None and layerbind_layout is not None:
+        save_boxed_debug_image(
+            image,
+            layerbind_layout,
+            os.path.join(intermediate_dir, f"{output_name or 'layerbind'}_100pct_boxed.png"),
+        )
 
     layer_stats_summary = finalize_layerbind_layer_stats(layer_stats_accumulator)
     if layer_stats_summary is not None:

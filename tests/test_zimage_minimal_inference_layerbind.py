@@ -265,3 +265,8 @@ def test_finalize_layerbind_layer_stats_suggests_text_dominant_layers():
     summary = zimage_minimal_inference.finalize_layerbind_layer_stats(accumulator)
 
     assert summary["suggested_hard_binding_layers"] == [0, 2, 3]
+
+
+def test_get_layerbind_debug_save_points_uses_requested_percents():
+    assert zimage_minimal_inference.get_layerbind_debug_save_points(30) == [(3, 10), (9, 30), (18, 60), (24, 80)]
+    assert zimage_minimal_inference.get_layerbind_debug_save_points(4) == [(1, 10), (2, 30), (3, 60), (4, 80)]
