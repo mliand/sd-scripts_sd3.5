@@ -850,6 +850,8 @@ def generate_image(
     if layerbind_layout is not None:
         if layerbind_layout.scene_prompt:
             prompt = layerbind_layout.scene_prompt
+        if layerbind_layout.negative_prompt:
+            negative_prompt = layerbind_layout.negative_prompt
 
         logger.info(
             "layerbind layout loaded: regions=%s eta1=%.3f eta2=%.3f beta=%.3f",

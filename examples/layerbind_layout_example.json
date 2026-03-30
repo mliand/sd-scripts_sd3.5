@@ -1,6 +1,7 @@
 {
   "background_prompt": "A natural outdoor scene with soft daylight and shallow depth of field",
-  "scene_prompt": "A glossy bee in front of a small brown mouse, natural outdoor scene",
+  "scene_prompt": "A man standing with a suitcase beside a dog, natural outdoor scene, full body",
+  "negative_prompt": "bad quality,twisty,blurry,ugly,unclear,dirty,bad structure",
   "config": {
     "eta1": 0.25,
     "eta2": 0.7,
@@ -8,18 +9,23 @@
     "phase2_beta_scale": 0.30,
     "phase2_delta_scale": 0.45,
     "phase2_branch_context_scale": 0.55,
-    "hard_binding_layers": [0, 9, 12, 16, 18, 20, 25, 27, 29]
+    "hard_binding_layers": [0, 15, 16, 18, 19, 20, 27, 28, 29]
   },
   "regions": [
     {
-      "region_prompt": "A small brown mouse with rounded ears and soft fur, full body",
-      "bbox": [320, 420, 760, 860],
+      "region_prompt": "A medium sized dog, full body",
+      "bbox": [120, 520, 430, 920],
       "layer_index": 1
     },
     {
-      "region_prompt": "A glossy bee with detailed wings and yellow black stripes, full body",
-      "bbox": [200, 300, 680, 780],
+      "region_prompt": "A man standing, full body",
+      "bbox": [360, 180, 690, 940],
       "layer_index": 2
+    },
+    {
+      "region_prompt": "A suitcase standing upright",
+      "bbox": [650, 520, 900, 900],
+      "layer_index": 3
     }
   ]
 }

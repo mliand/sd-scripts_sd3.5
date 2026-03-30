@@ -35,6 +35,7 @@ class RegionLayer:
 class LayerBindLayout:
     background_prompt: str = ""
     scene_prompt: str = ""
+    negative_prompt: str = ""
     config: LayerBindConfig = field(default_factory=LayerBindConfig)
     regions: list[RegionLayer] = field(default_factory=list)
 
@@ -94,6 +95,7 @@ def layerbind_layout_from_dict(data: dict[str, Any]) -> LayerBindLayout:
     return LayerBindLayout(
         background_prompt=str(data.get("background_prompt", "")),
         scene_prompt=str(data.get("scene_prompt", data.get("rewritten_prompt", ""))),
+        negative_prompt=str(data.get("negative_prompt", "")),
         config=layerbind_config_from_dict(data.get("config", data)),
         regions=regions,
     )
@@ -367,6 +369,7 @@ def populate_region_token_indices(
     return LayerBindLayout(
         background_prompt=layout.background_prompt,
         scene_prompt=layout.scene_prompt,
+        negative_prompt=layout.negative_prompt,
         config=layout.config,
         regions=sorted(populated_regions, key=lambda item: item.layer_index),
     )

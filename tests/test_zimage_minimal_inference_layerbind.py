@@ -46,6 +46,7 @@ def test_prepare_layerbind_layout_populates_token_indices_and_overrides_config(t
             {
                 "background_prompt": "background",
                 "scene_prompt": "scene override",
+                "negative_prompt": "bad quality",
                 "regions": [
                     {
                         "region_prompt": "front object",
@@ -75,6 +76,7 @@ def test_prepare_layerbind_layout_populates_token_indices_and_overrides_config(t
     )
 
     assert layout.scene_prompt == "scene override"
+    assert layout.negative_prompt == "bad quality"
     assert [region.layer_index for region in layout.regions] == [1, 2]
     assert layout.regions[0].token_indices == [1]
     assert layout.regions[1].token_indices == [0]
