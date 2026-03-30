@@ -576,6 +576,10 @@
   - 在 [library/zimage_layerbind_utils.py](/home/coco/workspace/sd-scripts_sd3.5/library/zimage_layerbind_utils.py) 中新增 `diff -> screened poisson smooth -> otsu -> morphology -> alpha` 的 token-space 近似实现
   - 在 [zimage_minimal_inference.py](/home/coco/workspace/sd-scripts_sd3.5/zimage_minimal_inference.py) 中，`alpha` 模式不再使用固定 `beta` 线性插值，而是使用估计出的 per-token alpha mask
   - `Reverse Adaptation` 也已从“直接写回全局 `x_tokens`”改为“仅作为 branch 内部背景上下文”，避免在 `1024x1024` 下污染整张全局潜变量
+- 已继续向论文 Phase 1 / Phase 2 调度对齐：
+  - `Phase 1` 的 branch blending 不再每个早期 timestep 都执行，而是只在 `t1` 触发一次
+  - `alpha mask` 不再跨层/跨步复用，改为每次融合重新估计，避免旧 mask 把噪声块固定在同一片区域
+  - `Phase 2` 的 local CTA 已改回“区域文本 + 全局图像上下文”，以减轻实例概念混淆
 
 ### 15.2 本轮未完成
 

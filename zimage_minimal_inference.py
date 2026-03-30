@@ -332,18 +332,16 @@ def blend_region_tokens(
             update = branch_tokens
             region_state["alpha_mask"] = torch.ones_like(branch_tokens[:, :, :1])
         else:
-            alpha_mask = region_state.get("alpha_mask")
-            if alpha_mask is None or alpha_mask.shape[:2] != branch_tokens.shape[:2]:
-                alpha_mask = zimage_layerbind_utils.estimate_alpha_from_token_difference(
-                    branch_tokens,
-                    current,
-                    indices,
-                    token_shape=token_shape,
-                    gamma=gamma,
-                    poisson_lambda=poisson_lambda,
-                    beta=beta,
-                )
-                region_state["alpha_mask"] = alpha_mask
+            alpha_mask = zimage_layerbind_utils.estimate_alpha_from_token_difference(
+                branch_tokens,
+                current,
+                indices,
+                token_shape=token_shape,
+                gamma=gamma,
+                poisson_lambda=poisson_lambda,
+                beta=beta,
+            )
+            region_state["alpha_mask"] = alpha_mask
             update = current + alpha_mask * (branch_tokens - current)
 
         blended.index_copy_(1, indices, update)
@@ -372,6 +370,7 @@ def run_layerbind_forward(
     blend_mode: str,
     gamma: float,
     poisson_lambda: float,
+    apply_phase1_blend: bool,
 ):
     active_condition = background_condition if phase == "phase1" else scene_condition
     cap_tokens = active_condition["tokens"]
@@ -470,6 +469,7 @@ def run_layerbind_forward(
                         adaln_input=adaln_input,
                         include_query_in_kv=True,
                     )
+                region_state["alpha_mask"] = None
 
                 region_state["text_tokens"] = layer.contextual_forward(
                     region_state["text_tokens"],
@@ -503,8 +503,8 @@ def run_layerbind_forward(
                 local_tokens = layer.contextual_forward(
                     region_tokens,
                     region_freqs,
-                    context_states=[region_state["text_tokens"], background_tokens],
-                    context_freqs_cis=[region_condition["freqs"], background_freqs],
+                    context_states=[region_state["text_tokens"], composed_x_tokens],
+                    context_freqs_cis=[region_condition["freqs"], region_x_freqs],
                     adaln_input=adaln_input,
                     include_query_in_kv=True,
                 )
@@ -517,6 +517,7 @@ def run_layerbind_forward(
                     include_query_in_kv=True,
                 )
                 region_state["branch_tokens"] = local_tokens
+                region_state["alpha_mask"] = None
                 composed_x_tokens = blend_region_tokens(
                     composed_x_tokens,
                     [region_state],
@@ -528,7 +529,7 @@ def run_layerbind_forward(
                 )
             x_tokens = composed_x_tokens
 
-    if phase == "phase1":
+    if phase == "phase1" and apply_phase1_blend:
         x_tokens = blend_region_tokens(
             x_tokens,
             region_states,
@@ -726,6 +727,7 @@ def generate_image(
                     blend_mode=blend_mode,
                     gamma=layerbind_layout.config.gamma,
                     poisson_lambda=layerbind_layout.config.poisson_lambda,
+                    apply_phase1_blend=phase == "phase1" and (i + 1) == t1_step,
                 )
             else:
                 model_out = transformer(x=latent_model_input, t=timestep, cap_feats=prompt_embeds, cap_mask=prompt_mask)
