@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Optional, Sequence
 
 import torch
+import torch.nn.functional as F
 
 from library import zimage_config
 
@@ -183,6 +184,147 @@ def token_indices_to_mask(
         if indices.numel() > 0:
             mask.index_fill_(0, indices, True)
     return mask.view(token_height, token_width)
+
+
+def _scatter_token_values(
+    token_values: torch.Tensor,
+    token_indices: Sequence[int] | torch.Tensor,
+    token_shape: tuple[int, int, int],
+) -> torch.Tensor:
+    _, token_height, token_width = token_shape
+    if isinstance(token_indices, torch.Tensor):
+        indices = token_indices.to(device=token_values.device, dtype=torch.long)
+    else:
+        indices = torch.tensor(list(token_indices), device=token_values.device, dtype=torch.long)
+
+    grid = torch.zeros(
+        (token_values.shape[0], 1, token_height * token_width),
+        device=token_values.device,
+        dtype=token_values.dtype,
+    )
+    if indices.numel() > 0:
+        scatter_index = indices.view(1, 1, -1).expand(token_values.shape[0], 1, -1)
+        grid.scatter_(2, scatter_index, token_values.unsqueeze(1))
+    return grid.view(token_values.shape[0], 1, token_height, token_width)
+
+
+def _scatter_token_mask(
+    token_indices: Sequence[int] | torch.Tensor,
+    token_shape: tuple[int, int, int],
+    device: torch.device,
+) -> torch.Tensor:
+    _, token_height, token_width = token_shape
+    if isinstance(token_indices, torch.Tensor):
+        indices = token_indices.to(device=device, dtype=torch.long)
+    else:
+        indices = torch.tensor(list(token_indices), device=device, dtype=torch.long)
+
+    mask = torch.zeros((1, 1, token_height * token_width), device=device, dtype=torch.float32)
+    if indices.numel() > 0:
+        scatter_index = indices.view(1, 1, -1)
+        mask.scatter_(2, scatter_index, torch.ones_like(scatter_index, dtype=torch.float32))
+    return mask.view(1, 1, token_height, token_width)
+
+
+def _screened_poisson_smooth(score_map: torch.Tensor, poisson_lambda: float, num_iters: int = 24) -> torch.Tensor:
+    smoothed = F.avg_pool2d(score_map, kernel_size=3, stride=1, padding=1)
+    for _ in range(num_iters):
+        neighbors = (
+            F.pad(smoothed[:, :, 1:, :], (0, 0, 0, 1))
+            + F.pad(smoothed[:, :, :-1, :], (0, 0, 1, 0))
+            + F.pad(smoothed[:, :, :, 1:], (0, 1, 0, 0))
+            + F.pad(smoothed[:, :, :, :-1], (1, 0, 0, 0))
+        )
+        smoothed = (neighbors + float(poisson_lambda) * score_map) / (4.0 + float(poisson_lambda))
+    return smoothed
+
+
+def _otsu_threshold(values: torch.Tensor, num_bins: int = 64) -> float:
+    if values.numel() == 0:
+        return 0.0
+
+    values = values.detach().float()
+    v_min = values.min().item()
+    v_max = values.max().item()
+    if not math.isfinite(v_min) or not math.isfinite(v_max) or abs(v_max - v_min) < 1e-6:
+        return float(v_min)
+
+    hist = torch.histc(values.cpu(), bins=num_bins, min=v_min, max=v_max)
+    prob = hist / hist.sum().clamp(min=1e-6)
+    bin_centers = torch.linspace(v_min, v_max, steps=num_bins)
+    omega = torch.cumsum(prob, dim=0)
+    mu = torch.cumsum(prob * bin_centers, dim=0)
+    mu_total = mu[-1]
+    sigma_between = (mu_total * omega - mu).pow(2) / (omega * (1.0 - omega)).clamp(min=1e-6)
+    return float(bin_centers[int(torch.argmax(sigma_between).item())].item())
+
+
+def _binary_dilate(mask: torch.Tensor, kernel_size: int = 3, iterations: int = 1) -> torch.Tensor:
+    out = mask.float()
+    for _ in range(iterations):
+        out = F.max_pool2d(out, kernel_size=kernel_size, stride=1, padding=kernel_size // 2)
+    return (out > 0).float()
+
+
+def _binary_erode(mask: torch.Tensor, kernel_size: int = 3, iterations: int = 1) -> torch.Tensor:
+    out = mask.float()
+    for _ in range(iterations):
+        out = 1.0 - F.max_pool2d(1.0 - out, kernel_size=kernel_size, stride=1, padding=kernel_size // 2)
+    return (out > 0).float()
+
+
+def _morphology_refine(mask: torch.Tensor) -> torch.Tensor:
+    closed = _binary_erode(_binary_dilate(mask, iterations=1), iterations=1)
+    opened = _binary_dilate(_binary_erode(closed, iterations=1), iterations=1)
+    return _binary_dilate(opened, iterations=1)
+
+
+def estimate_alpha_from_token_difference(
+    branch_tokens: torch.Tensor,
+    current_tokens: torch.Tensor,
+    token_indices: Sequence[int] | torch.Tensor,
+    token_shape: tuple[int, int, int],
+    gamma: float = 0.90,
+    poisson_lambda: float = 0.50,
+    beta: float = 1.0,
+) -> torch.Tensor:
+    if branch_tokens.shape != current_tokens.shape:
+        raise ValueError(
+            f"branch/current token shapes must match, got {tuple(branch_tokens.shape)} vs {tuple(current_tokens.shape)}"
+        )
+    if branch_tokens.ndim != 3:
+        raise ValueError(f"expected token tensors of shape [B, N, D], got {tuple(branch_tokens.shape)}")
+
+    diff = torch.linalg.vector_norm(branch_tokens - current_tokens, dim=-1)
+    median = diff.median(dim=1, keepdim=True).values
+    mad = (diff - median).abs().median(dim=1, keepdim=True).values
+    sigma_bg = (1.4826 * mad).clamp(min=1e-5)
+    score = (diff / sigma_bg).pow(float(gamma))
+
+    score_map = _scatter_token_values(score, token_indices, token_shape)
+    region_mask = _scatter_token_mask(token_indices, token_shape, branch_tokens.device)
+    score_map = score_map * region_mask
+
+    alpha_map = _screened_poisson_smooth(score_map, poisson_lambda=poisson_lambda)
+    alpha_map = alpha_map * region_mask
+
+    alpha_tokens = []
+    flat_alpha = alpha_map.view(alpha_map.shape[0], -1)
+    flat_region_mask = region_mask.view(-1).bool()
+    for batch_index in range(alpha_map.shape[0]):
+        region_values = flat_alpha[batch_index][flat_region_mask]
+        threshold = _otsu_threshold(region_values)
+        binary = ((alpha_map[batch_index : batch_index + 1] >= threshold).float() * region_mask).float()
+        binary = _morphology_refine(binary)
+        refined = alpha_map[batch_index : batch_index + 1] * binary
+        if refined.amax().item() <= 1e-6:
+            refined = alpha_map[batch_index : batch_index + 1]
+        refined = refined / refined.amax().clamp(min=1e-6)
+        alpha_tokens.append(refined.view(-1)[flat_region_mask])
+
+    alpha = torch.stack(alpha_tokens, dim=0).to(dtype=branch_tokens.dtype, device=branch_tokens.device)
+    alpha = alpha.clamp_(0.0, 1.0).unsqueeze(-1)
+    return alpha * float(beta)
 
 
 def populate_region_token_indices(

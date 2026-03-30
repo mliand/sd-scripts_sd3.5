@@ -290,6 +290,7 @@ def prepare_region_runtime_states(layout, x_seq_len: int, device: torch.device):
                 "background_indices": background_indices,
                 "branch_tokens": None,
                 "text_tokens": None,
+                "alpha_mask": None,
             }
         )
     return states
@@ -314,19 +315,36 @@ def blend_region_tokens(
     region_states: list[dict[str, Any]],
     beta: float,
     blend_mode: str,
+    token_shape: tuple[int, int, int],
+    gamma: float,
+    poisson_lambda: float,
 ):
     blended = x_tokens.clone()
-    for region_state in sorted(region_states, key=lambda item: item["layer_index"]):
+    sorted_states = sorted(region_states, key=lambda item: item["layer_index"])
+    for order, region_state in enumerate(sorted_states):
         branch_tokens = region_state.get("branch_tokens")
         indices = region_state["indices"]
         if branch_tokens is None or indices.numel() == 0:
             continue
 
-        if blend_mode == "direct":
+        current = blended.index_select(1, indices)
+        if blend_mode == "direct" or order == 0:
             update = branch_tokens
+            region_state["alpha_mask"] = torch.ones_like(branch_tokens[:, :, :1])
         else:
-            current = blended.index_select(1, indices)
-            update = current.lerp(branch_tokens, float(beta))
+            alpha_mask = region_state.get("alpha_mask")
+            if alpha_mask is None or alpha_mask.shape[:2] != branch_tokens.shape[:2]:
+                alpha_mask = zimage_layerbind_utils.estimate_alpha_from_token_difference(
+                    branch_tokens,
+                    current,
+                    indices,
+                    token_shape=token_shape,
+                    gamma=gamma,
+                    poisson_lambda=poisson_lambda,
+                    beta=beta,
+                )
+                region_state["alpha_mask"] = alpha_mask
+            update = current + alpha_mask * (branch_tokens - current)
 
         blended.index_copy_(1, indices, update)
     return blended
@@ -352,6 +370,8 @@ def run_layerbind_forward(
     hard_binding_layers: list[int],
     beta: float,
     blend_mode: str,
+    gamma: float,
+    poisson_lambda: float,
 ):
     active_condition = background_condition if phase == "phase1" else scene_condition
     cap_tokens = active_condition["tokens"]
@@ -412,6 +432,8 @@ def run_layerbind_forward(
                 background_tokens, background_freqs = transformer.select_token_subset(
                     x_tokens, region_state["background_indices"], region_x_freqs
                 )
+                local_background_tokens = background_tokens
+                local_background_freqs = background_freqs
 
                 if layer_idx in hard_binding_layers:
                     region_state["branch_tokens"] = layer.contextual_forward(
@@ -437,7 +459,8 @@ def run_layerbind_forward(
                             adaln_input=adaln_input,
                             include_query_in_kv=True,
                         )
-                        x_tokens = transformer.replace_token_subset(x_tokens, region_state["background_indices"], adapted_background)
+                        local_background_tokens = adapted_background
+                        local_background_freqs = background_freqs
                 else:
                     region_state["branch_tokens"] = layer.contextual_forward(
                         region_state["branch_tokens"],
@@ -451,8 +474,8 @@ def run_layerbind_forward(
                 region_state["text_tokens"] = layer.contextual_forward(
                     region_state["text_tokens"],
                     region_condition["freqs"],
-                    context_states=[region_state["branch_tokens"], background_tokens],
-                    context_freqs_cis=[branch_freqs, background_freqs],
+                    context_states=[region_state["branch_tokens"], local_background_tokens],
+                    context_freqs_cis=[branch_freqs, local_background_freqs],
                     adaln_input=adaln_input,
                     include_query_in_kv=True,
                 )
@@ -494,11 +517,27 @@ def run_layerbind_forward(
                     include_query_in_kv=True,
                 )
                 region_state["branch_tokens"] = local_tokens
-                composed_x_tokens = blend_region_tokens(composed_x_tokens, [region_state], beta, blend_mode)
+                composed_x_tokens = blend_region_tokens(
+                    composed_x_tokens,
+                    [region_state],
+                    beta,
+                    blend_mode,
+                    token_shape=x_meta["token_shape"],
+                    gamma=gamma,
+                    poisson_lambda=poisson_lambda,
+                )
             x_tokens = composed_x_tokens
 
     if phase == "phase1":
-        x_tokens = blend_region_tokens(x_tokens, region_states, beta, blend_mode)
+        x_tokens = blend_region_tokens(
+            x_tokens,
+            region_states,
+            beta,
+            blend_mode,
+            token_shape=x_meta["token_shape"],
+            gamma=gamma,
+            poisson_lambda=poisson_lambda,
+        )
 
     unified, _ = transformer.build_unified_tokens(x_tokens, x_freqs_cis, cap_tokens_current, cap_freqs_current)
     return transformer.finalize_image_tokens(
@@ -685,6 +724,8 @@ def generate_image(
                     hard_binding_layers=hard_binding_layers,
                     beta=layerbind_layout.config.beta,
                     blend_mode=blend_mode,
+                    gamma=layerbind_layout.config.gamma,
+                    poisson_lambda=layerbind_layout.config.poisson_lambda,
                 )
             else:
                 model_out = transformer(x=latent_model_input, t=timestep, cap_feats=prompt_embeds, cap_mask=prompt_mask)

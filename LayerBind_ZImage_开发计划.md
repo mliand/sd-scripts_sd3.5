@@ -572,6 +572,10 @@
   - 当前工作树已恢复 `branch/text` 的双向更新、`Hard Binding`、`Reverse Adaptation`
   - `branch` 初始化改为对齐论文 4.3：在 `Phase 1` 首次进入时从全局 image token 中拷贝，并跨 timestep 持续保留状态
   - 新增了按 caption length 重建 image token RoPE 的 helper，用于避免局部 CTA 中不同文本长度造成的位置编码错配
+- 已开始补论文式 alpha 融合链路：
+  - 在 [library/zimage_layerbind_utils.py](/home/coco/workspace/sd-scripts_sd3.5/library/zimage_layerbind_utils.py) 中新增 `diff -> screened poisson smooth -> otsu -> morphology -> alpha` 的 token-space 近似实现
+  - 在 [zimage_minimal_inference.py](/home/coco/workspace/sd-scripts_sd3.5/zimage_minimal_inference.py) 中，`alpha` 模式不再使用固定 `beta` 线性插值，而是使用估计出的 per-token alpha mask
+  - `Reverse Adaptation` 也已从“直接写回全局 `x_tokens`”改为“仅作为 branch 内部背景上下文”，避免在 `1024x1024` 下污染整张全局潜变量
 
 ### 15.2 本轮未完成
 

@@ -1,8 +1,11 @@
+import torch
+
 from library.zimage_layerbind_utils import (
     LayerBindLayout,
     RegionLayer,
     bbox_to_token_bounds,
     bbox_to_token_indices,
+    estimate_alpha_from_token_difference,
     get_token_grid_size,
     populate_region_token_indices,
     token_indices_to_mask,
@@ -60,3 +63,23 @@ def test_populate_region_token_indices_gives_front_region_overlap_priority():
     assert [region.layer_index for region in populated.regions] == [1, 2]
     assert populated.regions[0].token_indices == [0]
     assert populated.regions[1].token_indices == [1, 2]
+
+
+def test_estimate_alpha_from_token_difference_highlights_changed_tokens():
+    current = torch.zeros(1, 2, 4)
+    branch = current.clone()
+    branch[:, 0] = 4.0
+
+    alpha = estimate_alpha_from_token_difference(
+        branch,
+        current,
+        token_indices=[0, 1],
+        token_shape=(1, 2, 2),
+        gamma=0.9,
+        poisson_lambda=0.5,
+        beta=1.0,
+    )
+
+    assert alpha.shape == (1, 2, 1)
+    assert alpha[0, 0, 0].item() > alpha[0, 1, 0].item()
+    assert 0.0 <= alpha[0, 0, 0].item() <= 1.0
