@@ -609,19 +609,17 @@ def generate_image(
             os.makedirs(intermediate_dir, exist_ok=True)
 
     with torch.autocast(device_type=device.type, dtype=dtype), torch.no_grad():
-        region_states = None
         for i, t in enumerate(timesteps):
             timestep = t.expand(latents.shape[0])
             timestep = (1000 - timestep) / 1000
 
             latent_model_input = latents.to(dtype).unsqueeze(2)
             if use_layerbind and i < t2_step:
-                if region_states is None:
-                    region_states = prepare_region_runtime_states(
-                        layerbind_layout,
-                        layerbind_conditions["image_sequence_length"],
-                        device=latent_model_input.device,
-                    )
+                region_states = prepare_region_runtime_states(
+                    layerbind_layout,
+                    layerbind_conditions["image_sequence_length"],
+                    device=latent_model_input.device,
+                )
                 phase = "phase1" if i < t1_step else "phase2"
                 model_out = run_layerbind_forward(
                     transformer,

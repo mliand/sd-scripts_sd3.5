@@ -44,3 +44,19 @@ def test_populate_region_token_indices_preserves_layer_order():
     assert [region.layer_index for region in populated.regions] == [1, 2]
     assert populated.regions[0].token_indices == [0]
     assert populated.regions[1].token_indices == [1]
+
+
+def test_populate_region_token_indices_gives_front_region_overlap_priority():
+    layout = LayerBindLayout(
+        scene_prompt="scene",
+        regions=[
+            RegionLayer(region_prompt="back", bbox=(0, 0, 32, 16), layer_index=1),
+            RegionLayer(region_prompt="front", bbox=(16, 0, 48, 16), layer_index=2),
+        ],
+    )
+
+    populated = populate_region_token_indices(layout, image_width=1024, image_height=1024)
+
+    assert [region.layer_index for region in populated.regions] == [1, 2]
+    assert populated.regions[0].token_indices == [0]
+    assert populated.regions[1].token_indices == [1, 2]

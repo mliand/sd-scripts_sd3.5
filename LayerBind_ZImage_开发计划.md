@@ -564,6 +564,9 @@
   - `LayerBind` 预计算 caption tokens 时，padding 分支会把 `bf16` token 意外提升为 `float32`
   - 该问题会在 `context_refiner` 的 `to_q` 线性层触发 dtype mismatch
   - 当前已在 [library/zimage_model.py](/home/coco/workspace/sd-scripts_sd3.5/library/zimage_model.py) 修复 dtype 保持逻辑，并在 [zimage_minimal_inference.py](/home/coco/workspace/sd-scripts_sd3.5/zimage_minimal_inference.py) 里将 LayerBind 条件预计算放入 `autocast + no_grad`
+- 已修复两处首轮实机质量问题：
+  - `region_states` 不再跨 timestep 复用，避免 branch token 在扩散步之间累积漂移
+  - 重叠 bbox 的 token ownership 改为按 `layer_index` 去重，前景 region 优先占有 overlap token
 
 ### 15.2 本轮未完成
 
