@@ -139,6 +139,8 @@ def test_generate_image_only_blends_phase1_at_t1(monkeypatch, tmp_path):
         blend_mode,
         gamma,
         poisson_lambda,
+        phase2_beta_scale,
+        phase2_delta_scale,
         apply_phase1_blend,
     ):
         if phase == "phase1":

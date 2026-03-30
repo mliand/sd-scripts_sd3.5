@@ -57,6 +57,10 @@ def test_prepare_layerbind_layout_populates_token_indices_and_overrides_config(t
     assert layout.config.beta == 0.55
 
 
+def test_default_hard_binding_layers_use_conservative_subset():
+    assert zimage_minimal_inference.get_default_layerbind_hard_binding_layers(30) == [0, 10, 24, 29]
+
+
 def test_build_prompts_includes_layerbind_fields():
     args = Namespace(
         sample_prompts=None,

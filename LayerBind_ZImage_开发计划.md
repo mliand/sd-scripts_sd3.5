@@ -580,6 +580,10 @@
   - `Phase 1` 的 branch blending 不再每个早期 timestep 都执行，而是只在 `t1` 触发一次
   - `alpha mask` 不再跨层/跨步复用，改为每次融合重新估计，避免旧 mask 把噪声块固定在同一片区域
   - `Phase 2` 的 local CTA 已改回“区域文本 + 全局图像上下文”，以减轻实例概念混淆
+- 已新增一轮保守默认值收敛：
+  - 默认 `hard_binding_layers` 已收缩为更稀疏的子集，降低 Z-Image 上的过强文本绑定
+  - `Phase 2` 新增 `phase2_beta_scale / phase2_delta_scale` 配置，默认降低局部 token 更新和融合强度
+  - 样例配置 [examples/layerbind_layout_example.json](/home/coco/workspace/sd-scripts_sd3.5/examples/layerbind_layout_example.json) 已同步切换到更保守的 `1024x1024` 调参基线
 
 ### 15.2 本轮未完成
 

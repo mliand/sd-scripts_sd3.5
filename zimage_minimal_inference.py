@@ -130,8 +130,8 @@ def build_prompts(args: argparse.Namespace):
 
 
 def get_default_layerbind_hard_binding_layers(num_layers: int) -> list[int]:
-    # Map the FLUX layer distribution onto the current model depth.
-    flux_reference = [0, 15, 18, 42, 45, 48, 50, 53, 54]
+    # Use a conservative subset of the FLUX text-dominant layers to avoid over-binding on Z-Image.
+    flux_reference = [0, 18, 45, 54]
     flux_max_index = 54
     mapped = {
         min(num_layers - 1, round(reference / flux_max_index * max(num_layers - 1, 1)))
@@ -370,6 +370,8 @@ def run_layerbind_forward(
     blend_mode: str,
     gamma: float,
     poisson_lambda: float,
+    phase2_beta_scale: float,
+    phase2_delta_scale: float,
     apply_phase1_blend: bool,
 ):
     active_condition = background_condition if phase == "phase1" else scene_condition
@@ -508,6 +510,7 @@ def run_layerbind_forward(
                     adaln_input=adaln_input,
                     include_query_in_kv=True,
                 )
+                local_tokens = region_tokens.lerp(local_tokens, float(phase2_delta_scale))
                 region_state["text_tokens"] = layer.contextual_forward(
                     region_state["text_tokens"],
                     region_condition["freqs"],
@@ -521,7 +524,7 @@ def run_layerbind_forward(
                 composed_x_tokens = blend_region_tokens(
                     composed_x_tokens,
                     [region_state],
-                    beta,
+                    beta * float(phase2_beta_scale),
                     blend_mode,
                     token_shape=x_meta["token_shape"],
                     gamma=gamma,
@@ -727,6 +730,8 @@ def generate_image(
                     blend_mode=blend_mode,
                     gamma=layerbind_layout.config.gamma,
                     poisson_lambda=layerbind_layout.config.poisson_lambda,
+                    phase2_beta_scale=layerbind_layout.config.phase2_beta_scale,
+                    phase2_delta_scale=layerbind_layout.config.phase2_delta_scale,
                     apply_phase1_blend=phase == "phase1" and (i + 1) == t1_step,
                 )
             else:
