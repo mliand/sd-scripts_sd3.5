@@ -2,11 +2,12 @@
   "background_prompt": "A natural outdoor scene with soft daylight and shallow depth of field",
   "scene_prompt": "A glossy bee in front of a small brown mouse, natural outdoor scene",
   "config": {
-    "eta1": 0.2,
+    "eta1": 0.25,
     "eta2": 0.7,
     "beta": 0.55,
     "phase2_beta_scale": 0.30,
     "phase2_delta_scale": 0.45,
+    "phase2_branch_context_scale": 0.55,
     "hard_binding_layers": [0, 10, 24, 29]
   },
   "regions": [

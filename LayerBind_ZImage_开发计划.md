@@ -584,6 +584,10 @@
   - 默认 `hard_binding_layers` 已收缩为更稀疏的子集，降低 Z-Image 上的过强文本绑定
   - `Phase 2` 新增 `phase2_beta_scale / phase2_delta_scale` 配置，默认降低局部 token 更新和融合强度
   - 样例配置 [examples/layerbind_layout_example.json](/home/coco/workspace/sd-scripts_sd3.5/examples/layerbind_layout_example.json) 已同步切换到更保守的 `1024x1024` 调参基线
+- 已针对“对象跑到目标区域外”继续修正：
+  - `Phase 2` 已显式接回 `Phase 1` 的 `branch_tokens` 作为 branch 语义上下文，而不是只依赖当前全局区域 token
+  - 新增 `phase2_branch_context_scale` 配置，用于控制 `Phase 1` 语义记忆在 `Phase 2` 中的注入力度
+  - 样例配置的 `eta1` 已上调到 `0.25`，更接近论文在 SD3.5 路线上的早期绑定时长
 
 ### 15.2 本轮未完成
 

@@ -372,6 +372,7 @@ def run_layerbind_forward(
     poisson_lambda: float,
     phase2_beta_scale: float,
     phase2_delta_scale: float,
+    phase2_branch_context_scale: float,
     apply_phase1_blend: bool,
 ):
     active_condition = background_condition if phase == "phase1" else scene_condition
@@ -502,11 +503,15 @@ def run_layerbind_forward(
                 )
                 if region_state["text_tokens"] is None:
                     region_state["text_tokens"] = region_condition["tokens"].clone()
+                branch_prior = region_state.get("branch_tokens")
+                if branch_prior is None or branch_prior.shape != region_tokens.shape:
+                    branch_prior = region_tokens
+                branch_context = region_tokens.lerp(branch_prior, float(phase2_branch_context_scale))
                 local_tokens = layer.contextual_forward(
                     region_tokens,
                     region_freqs,
-                    context_states=[region_state["text_tokens"], composed_x_tokens],
-                    context_freqs_cis=[region_condition["freqs"], region_x_freqs],
+                    context_states=[region_state["text_tokens"], branch_context, composed_x_tokens],
+                    context_freqs_cis=[region_condition["freqs"], region_freqs, region_x_freqs],
                     adaln_input=adaln_input,
                     include_query_in_kv=True,
                 )
@@ -732,6 +737,7 @@ def generate_image(
                     poisson_lambda=layerbind_layout.config.poisson_lambda,
                     phase2_beta_scale=layerbind_layout.config.phase2_beta_scale,
                     phase2_delta_scale=layerbind_layout.config.phase2_delta_scale,
+                    phase2_branch_context_scale=layerbind_layout.config.phase2_branch_context_scale,
                     apply_phase1_blend=phase == "phase1" and (i + 1) == t1_step,
                 )
             else:

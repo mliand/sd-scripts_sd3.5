@@ -19,6 +19,7 @@ class LayerBindConfig:
     poisson_lambda: float = 0.50
     phase2_beta_scale: float = 0.35
     phase2_delta_scale: float = 0.50
+    phase2_branch_context_scale: float = 0.60
     hard_binding_layers: list[int] = field(default_factory=list)
 
 
@@ -49,7 +50,16 @@ def layerbind_config_from_dict(data: Optional[dict[str, Any]]) -> LayerBindConfi
         return LayerBindConfig()
 
     config = LayerBindConfig()
-    for key in ("eta1", "eta2", "beta", "gamma", "poisson_lambda", "phase2_beta_scale", "phase2_delta_scale"):
+    for key in (
+        "eta1",
+        "eta2",
+        "beta",
+        "gamma",
+        "poisson_lambda",
+        "phase2_beta_scale",
+        "phase2_delta_scale",
+        "phase2_branch_context_scale",
+    ):
         if key in data and data[key] is not None:
             setattr(config, key, float(data[key]))
 
