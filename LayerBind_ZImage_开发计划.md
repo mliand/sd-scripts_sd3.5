@@ -581,17 +581,12 @@
   - `Phase 1` 的 branch blending 不再每个早期 timestep 都执行，而是只在 `t1` 触发一次
   - `alpha mask` 不再跨层/跨步复用，改为每次融合重新估计，避免旧 mask 把噪声块固定在同一片区域
   - `Phase 2` 的 local CTA 已改回“区域文本 + 全局图像上下文”，以减轻实例概念混淆
-- 已新增一轮保守默认值收敛：
-  - 默认 `hard_binding_layers` 已收缩为更稀疏的子集，降低 Z-Image 上的过强文本绑定
-  - `Phase 2` 新增 `phase2_beta_scale / phase2_delta_scale` 配置，默认降低局部 token 更新和融合强度
-  - 样例配置 [examples/layerbind_layout_example.json](/home/coco/workspace/sd-scripts_sd3.5/examples/layerbind_layout_example.json) 已同步切换到更保守的 `1024x1024` 调参基线
 - 已针对“对象跑到目标区域外”继续修正：
-  - `Phase 2` 已显式接回 `Phase 1` 的 `branch_tokens` 作为 branch 语义上下文，而不是只依赖当前全局区域 token
-  - 新增 `phase2_branch_context_scale` 配置，用于控制 `Phase 1` 语义记忆在 `Phase 2` 中的注入力度
   - 样例配置的 `eta1` 已上调到 `0.25`，更接近论文在 SD3.5 路线上的早期绑定时长
 - 已继续按论文对齐 `Phase 1 / Phase 2` 的剩余偏差：
   - 重叠 token 不再在预处理阶段裁掉，而是完整保留到 compositing 阶段处理
   - `Phase 2` 已从“复用 Phase 1 的 diff-alpha 融合”改为固定 `beta * region mask` 的顺序 compositing
+  - `Phase 2` 的局部路径已进一步收回论文原式：`region text + global image`，不再额外注入 `branch_context` 或 `Phase 2` 强度缩放
   - 默认 `hard_binding_layers` 已从保守 4 层改回更接近论文 SD3.5 文本主导层密度的 9 层映射
   - `Phase 1` 已不再在每个 timestep 开始时回锚到当前全局区域 token；当前会在首次进入 `Phase 1` 时从全局 latent patch 拷贝 branch seed，并在后续 timestep 中通过独立 branch residual 执行局部 ODE 更新
 - 已开始落地 `M7` 的 attention 统计式 layer search：

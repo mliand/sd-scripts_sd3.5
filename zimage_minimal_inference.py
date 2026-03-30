@@ -544,16 +544,15 @@ def blend_region_tokens(
 
 def compose_phase2_region_tokens(
     x_tokens: torch.Tensor,
-    region_state: dict[str, Any],
+    local_tokens: torch.Tensor,
+    indices: torch.Tensor,
     beta: float,
 ):
-    branch_tokens = region_state.get("branch_tokens")
-    indices = region_state["indices"]
-    if branch_tokens is None or indices.numel() == 0:
+    if local_tokens is None or indices.numel() == 0:
         return x_tokens
 
     current = x_tokens.index_select(1, indices)
-    update = current.lerp(branch_tokens, float(beta))
+    update = current.lerp(local_tokens, float(beta))
     composed = x_tokens.clone()
     composed.index_copy_(1, indices, update)
     return composed
@@ -619,9 +618,6 @@ def run_layerbind_forward(
     blend_mode: str,
     gamma: float,
     poisson_lambda: float,
-    phase2_beta_scale: float,
-    phase2_delta_scale: float,
-    phase2_branch_context_scale: float,
     apply_phase1_blend: bool,
     layer_stats_accumulator: Optional[dict[str, Any]] = None,
 ):
@@ -775,19 +771,14 @@ def run_layerbind_forward(
                 )
                 if region_state["text_tokens"] is None:
                     region_state["text_tokens"] = region_condition["tokens"].clone()
-                branch_prior = region_state.get("branch_tokens")
-                if branch_prior is None or branch_prior.shape != region_tokens.shape:
-                    branch_prior = region_tokens
-                branch_context = region_tokens.lerp(branch_prior, float(phase2_branch_context_scale))
                 local_tokens = layer.contextual_forward(
                     region_tokens,
                     region_freqs,
-                    context_states=[region_state["text_tokens"], branch_context, composed_x_tokens],
-                    context_freqs_cis=[region_condition["freqs"], region_freqs, region_x_freqs],
+                    context_states=[region_state["text_tokens"], composed_x_tokens],
+                    context_freqs_cis=[region_condition["freqs"], region_x_freqs],
                     adaln_input=adaln_input,
                     include_query_in_kv=True,
                 )
-                local_tokens = region_tokens.lerp(local_tokens, float(phase2_delta_scale))
                 region_state["text_tokens"] = layer.contextual_forward(
                     region_state["text_tokens"],
                     region_condition["freqs"],
@@ -800,8 +791,9 @@ def run_layerbind_forward(
                 region_state["alpha_mask"] = None
                 composed_x_tokens = compose_phase2_region_tokens(
                     composed_x_tokens,
-                    region_state,
-                    beta * float(phase2_beta_scale),
+                    local_tokens,
+                    region_state["indices"],
+                    beta,
                 )
             x_tokens = composed_x_tokens
 
@@ -1030,9 +1022,6 @@ def generate_image(
                     blend_mode=blend_mode,
                     gamma=layerbind_layout.config.gamma,
                     poisson_lambda=layerbind_layout.config.poisson_lambda,
-                    phase2_beta_scale=layerbind_layout.config.phase2_beta_scale,
-                    phase2_delta_scale=layerbind_layout.config.phase2_delta_scale,
-                    phase2_branch_context_scale=layerbind_layout.config.phase2_branch_context_scale,
                     apply_phase1_blend=phase == "phase1" and (i + 1) == t1_step,
                     layer_stats_accumulator=layer_stats_accumulator,
                 )

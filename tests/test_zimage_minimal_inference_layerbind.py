@@ -190,9 +190,6 @@ def test_phase1_branch_state_evolves_independently_from_current_global_patches()
         blend_mode="alpha",
         gamma=0.9,
         poisson_lambda=0.5,
-        phase2_beta_scale=0.35,
-        phase2_delta_scale=0.5,
-        phase2_branch_context_scale=0.6,
         apply_phase1_blend=False,
     )
     first_branch_patches = region_states[0]["branch_patches"].clone()
@@ -213,9 +210,6 @@ def test_phase1_branch_state_evolves_independently_from_current_global_patches()
         blend_mode="alpha",
         gamma=0.9,
         poisson_lambda=0.5,
-        phase2_beta_scale=0.35,
-        phase2_delta_scale=0.5,
-        phase2_branch_context_scale=0.6,
         apply_phase1_blend=False,
     )
 

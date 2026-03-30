@@ -1,30 +1,27 @@
 {
-  "background_prompt": "A natural outdoor scene with soft daylight and shallow depth of field",
-  "scene_prompt": "A man standing with a suitcase beside a dog, natural outdoor scene, full body",
+  "background_prompt": "A clean white background, illustration style",
+  "scene_prompt": "An illustration of a girl standing in the center, a cat on the right, and an apple tree on the left, clean white background",
   "negative_prompt": "bad quality,twisty,blurry,ugly,unclear,dirty,bad structure",
   "config": {
     "eta1": 0.25,
     "eta2": 0.7,
     "beta": 0.55,
-    "phase2_beta_scale": 0.30,
-    "phase2_delta_scale": 0.45,
-    "phase2_branch_context_scale": 0.55,
     "hard_binding_layers": [0, 15, 16, 18, 19, 20, 27, 28, 29]
   },
   "regions": [
     {
-      "region_prompt": "A medium sized dog, full body",
-      "bbox": [120, 520, 430, 920],
+      "region_prompt": "An apple tree, illustration",
+      "bbox": [60, 180, 380, 940],
       "layer_index": 1
     },
     {
-      "region_prompt": "A man standing, full body",
-      "bbox": [360, 180, 690, 940],
+      "region_prompt": "A girl standing, full body, illustration",
+      "bbox": [360, 180, 700, 940],
       "layer_index": 2
     },
     {
-      "region_prompt": "A suitcase standing upright",
-      "bbox": [650, 520, 900, 900],
+      "region_prompt": "A cat, full body, illustration",
+      "bbox": [700, 420, 940, 860],
       "layer_index": 3
     }
   ]
