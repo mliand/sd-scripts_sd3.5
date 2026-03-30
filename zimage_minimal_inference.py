@@ -786,7 +786,7 @@ def run_layerbind_forward(
                 region_state["text_tokens"] = layer.contextual_forward(
                     region_state["text_tokens"],
                     region_condition["freqs"],
-                    context_states=[region_tokens, cap_tokens_current],
+                    context_states=[local_tokens, cap_tokens_current],
                     context_freqs_cis=[region_freqs, cap_freqs_current],
                     adaln_input=adaln_input,
                     include_query_in_kv=True,
