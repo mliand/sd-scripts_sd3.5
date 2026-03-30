@@ -143,6 +143,8 @@ def test_generate_image_only_blends_phase1_at_t1(monkeypatch, tmp_path):
         blend_mode,
         gamma,
         poisson_lambda,
+        phase2_beta_scale,
+        phase2_delta_scale,
         apply_phase1_blend,
         layer_stats_accumulator,
     ):
@@ -240,6 +242,8 @@ def test_generate_image_writes_layer_stats_json(monkeypatch, tmp_path):
         blend_mode,
         gamma,
         poisson_lambda,
+        phase2_beta_scale,
+        phase2_delta_scale,
         apply_phase1_blend,
         layer_stats_accumulator,
     ):
@@ -352,6 +356,8 @@ def test_generate_image_saves_debug_images_at_percent_checkpoints(monkeypatch, t
         blend_mode,
         gamma,
         poisson_lambda,
+        phase2_beta_scale,
+        phase2_delta_scale,
         apply_phase1_blend,
         layer_stats_accumulator,
     ):
