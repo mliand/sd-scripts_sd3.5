@@ -19,7 +19,7 @@
 """Z-Image Transformer."""
 
 import math
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 import logging
 
 import torch
@@ -246,48 +246,56 @@ class ZImageAttention(nn.Module):
         }
         return stats
 
-    def _forward(
-        self, hidden_states: torch.Tensor, freqs_cis: Optional[torch.Tensor] = None, attn_params: Optional[AttentionParams] = None
-    ) -> torch.Tensor:
+    def _split_query_and_gate(self, query: torch.Tensor) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         gate_score = None
-        query = self.to_q(hidden_states)
-        key = self.to_k(hidden_states)
-        value = self.to_v(hidden_states)
-
         if self.gate_type == "headwise":
             query = query.reshape(query.shape[0], query.shape[1], self.n_heads, self.head_dim + 1)
             query, gate_score = torch.split(query, [self.head_dim, 1], dim=-1)
-            if not self.gate_enabled:
-                gate_score = None
         elif self.gate_type == "elementwise":
             query = query.reshape(query.shape[0], query.shape[1], self.n_heads, self.head_dim * 2)
             query, gate_score = torch.split(query, [self.head_dim, self.head_dim], dim=-1)
-            if not self.gate_enabled:
-                gate_score = None
         else:
-            query = query.unflatten(-1, (self.n_heads, -1))  # [B, seq_len, n_heads, head_dim]
-        key = key.unflatten(-1, (self.n_kv_heads, -1))
-        value = value.unflatten(-1, (self.n_kv_heads, -1))
+            query = query.unflatten(-1, (self.n_heads, -1))
+
+        if gate_score is not None and not self.gate_enabled:
+            gate_score = None
+
+        return query, gate_score
+
+    def _project_query(
+        self, hidden_states: torch.Tensor, freqs_cis: Optional[torch.Tensor] = None
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor], torch.dtype]:
+        query = self.to_q(hidden_states)
+        query, gate_score = self._split_query_and_gate(query)
 
         if self.norm_q is not None:
             query = self.norm_q(query)
-        if self.norm_k is not None:
-            key = self.norm_k(key)
-
         if freqs_cis is not None:
             query = apply_rotary_emb(query, freqs_cis)
+
+        target_dtype = query.dtype if not self.use_16bit else hidden_states.dtype
+        query = query.to(target_dtype)
+        return query, gate_score, target_dtype
+
+    def _project_key_value(
+        self, hidden_states: torch.Tensor, freqs_cis: Optional[torch.Tensor] = None, dtype: Optional[torch.dtype] = None
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        key = self.to_k(hidden_states).unflatten(-1, (self.n_kv_heads, -1))
+        value = self.to_v(hidden_states).unflatten(-1, (self.n_kv_heads, -1))
+
+        if self.norm_k is not None:
+            key = self.norm_k(key)
+        if freqs_cis is not None:
             key = apply_rotary_emb(key, freqs_cis)
 
-        # query.dtype is float32. It is imcompatible with FlashAttention, so we convert to the original dtype if use_16bit is set.
-        dtype = query.dtype if not self.use_16bit else value.dtype
-        query, key = query.to(dtype), key.to(dtype)
+        if dtype is None:
+            dtype = key.dtype if not self.use_16bit else value.dtype
+        key = key.to(dtype)
+        return key, value
 
-        # Call attention
-        qkv = [query, key, value]
-        del query, key, value
-        hidden_states = attention(qkv, attn_params=attn_params)
-        del qkv
-
+    def _finalize_attention_output(
+        self, hidden_states: torch.Tensor, gate_score: Optional[torch.Tensor], dtype: torch.dtype
+    ) -> torch.Tensor:
         if gate_score is not None:
             gate_values = torch.sigmoid(gate_score)
             hidden_states = hidden_states.reshape(hidden_states.shape[0], hidden_states.shape[1], self.n_heads, self.head_dim)
@@ -298,9 +306,84 @@ class ZImageAttention(nn.Module):
             hidden_states = hidden_states.reshape(hidden_states.shape[0], hidden_states.shape[1], -1)
 
         hidden_states = hidden_states.to(dtype)
+        return self.to_out[0](hidden_states)
 
-        output = self.to_out[0](hidden_states)
-        return output
+    @staticmethod
+    def _normalize_context_states(
+        context_states: Optional[Sequence[torch.Tensor] | torch.Tensor],
+    ) -> list[torch.Tensor]:
+        if context_states is None:
+            return []
+        if isinstance(context_states, torch.Tensor):
+            return [context_states]
+        return list(context_states)
+
+    @staticmethod
+    def _normalize_context_freqs(
+        context_freqs_cis: Optional[Sequence[torch.Tensor] | torch.Tensor],
+        expected_length: int,
+    ) -> list[Optional[torch.Tensor]]:
+        if context_freqs_cis is None:
+            return [None] * expected_length
+        if isinstance(context_freqs_cis, torch.Tensor):
+            freqs = [context_freqs_cis]
+        else:
+            freqs = list(context_freqs_cis)
+        if len(freqs) != expected_length:
+            raise ValueError(f"Expected {expected_length} context freq tensors, got {len(freqs)}")
+        return freqs
+
+    @staticmethod
+    def _concat_freqs(
+        query_freqs_cis: Optional[torch.Tensor],
+        context_freqs_cis: list[Optional[torch.Tensor]],
+        include_query_in_kv: bool,
+    ) -> Optional[torch.Tensor]:
+        freq_parts = []
+        if include_query_in_kv:
+            freq_parts.append(query_freqs_cis)
+        freq_parts.extend(context_freqs_cis)
+
+        if not freq_parts:
+            return None
+        if any(freq is None for freq in freq_parts):
+            if not all(freq is None for freq in freq_parts):
+                raise ValueError("query/context freq tensors must be provided together")
+            return None
+        return torch.cat(freq_parts, dim=1) if len(freq_parts) > 1 else freq_parts[0]
+
+    def contextual_forward(
+        self,
+        query_states: torch.Tensor,
+        context_states: Optional[Sequence[torch.Tensor] | torch.Tensor] = None,
+        query_freqs_cis: Optional[torch.Tensor] = None,
+        context_freqs_cis: Optional[Sequence[torch.Tensor] | torch.Tensor] = None,
+        attn_params: Optional[AttentionParams] = None,
+        include_query_in_kv: bool = True,
+    ) -> torch.Tensor:
+        context_list = self._normalize_context_states(context_states)
+        context_freqs_list = self._normalize_context_freqs(context_freqs_cis, len(context_list))
+
+        kv_parts = [query_states] if include_query_in_kv else []
+        kv_parts.extend(context_list)
+        if not kv_parts:
+            raise ValueError("contextual_forward requires query in kv or at least one context tensor")
+
+        kv_states = torch.cat(kv_parts, dim=1) if len(kv_parts) > 1 else kv_parts[0]
+        kv_freqs_cis = self._concat_freqs(query_freqs_cis, context_freqs_list, include_query_in_kv)
+
+        query, gate_score, dtype = self._project_query(query_states, query_freqs_cis)
+        key, value = self._project_key_value(kv_states, kv_freqs_cis, dtype=dtype)
+        hidden_states = attention(query, key, value, attn_params=attn_params)
+        return self._finalize_attention_output(hidden_states, gate_score, dtype)
+
+    def _forward(
+        self, hidden_states: torch.Tensor, freqs_cis: Optional[torch.Tensor] = None, attn_params: Optional[AttentionParams] = None
+    ) -> torch.Tensor:
+        query, gate_score, dtype = self._project_query(hidden_states, freqs_cis)
+        key, value = self._project_key_value(hidden_states, freqs_cis, dtype=dtype)
+        hidden_states = attention(query, key, value, attn_params=attn_params)
+        return self._finalize_attention_output(hidden_states, gate_score, dtype)
 
     def forward(
         self, hidden_states: torch.Tensor, freqs_cis: Optional[torch.Tensor] = None, attn_params: Optional[AttentionParams] = None
@@ -385,6 +468,106 @@ class ZImageTransformerBlock(nn.Module):
         if hasattr(self.attention, "restore_frozen_gate"):
             self.attention.restore_frozen_gate()
 
+    def _get_modulation(self, adaln_input: Optional[torch.Tensor]):
+        if not self.modulation:
+            return None
+        assert adaln_input is not None
+        scale_msa, gate_msa, scale_mlp, gate_mlp = self.adaLN_modulation[0](adaln_input).unsqueeze(1).chunk(4, dim=2)
+        gate_msa, gate_mlp = gate_msa.tanh(), gate_mlp.tanh()
+        scale_msa, scale_mlp = 1.0 + scale_msa, 1.0 + scale_mlp
+        return scale_msa, gate_msa, scale_mlp, gate_mlp
+
+    def _normalize_attention_input(self, x: torch.Tensor, scale_msa: Optional[torch.Tensor] = None) -> torch.Tensor:
+        x = self.attention_norm1(x)
+        if scale_msa is not None:
+            x = x * scale_msa
+        return x
+
+    def _apply_attention_and_ffn(
+        self,
+        x: torch.Tensor,
+        attn_out: torch.Tensor,
+        scale_mlp: Optional[torch.Tensor] = None,
+        gate_msa: Optional[torch.Tensor] = None,
+        gate_mlp: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if gate_msa is None:
+            x = x + self.attention_norm2(attn_out)
+            x = x + self.ffn_norm2(self.feed_forward(self.ffn_norm1(x)))
+            return x
+
+        x = x + gate_msa * self.attention_norm2(attn_out)
+        ffn_input = self.ffn_norm1(x)
+        if scale_mlp is not None:
+            ffn_input = ffn_input * scale_mlp
+        x = x + gate_mlp * self.ffn_norm2(self.feed_forward(ffn_input))
+        return x
+
+    @staticmethod
+    def _normalize_context_states(
+        context_states: Optional[Sequence[torch.Tensor] | torch.Tensor],
+    ) -> list[torch.Tensor]:
+        if context_states is None:
+            return []
+        if isinstance(context_states, torch.Tensor):
+            return [context_states]
+        return list(context_states)
+
+    @staticmethod
+    def _normalize_context_freqs(
+        context_freqs_cis: Optional[Sequence[torch.Tensor] | torch.Tensor],
+        expected_length: int,
+    ) -> list[Optional[torch.Tensor]]:
+        if context_freqs_cis is None:
+            return [None] * expected_length
+        if isinstance(context_freqs_cis, torch.Tensor):
+            freqs = [context_freqs_cis]
+        else:
+            freqs = list(context_freqs_cis)
+        if len(freqs) != expected_length:
+            raise ValueError(f"Expected {expected_length} context freq tensors, got {len(freqs)}")
+        return freqs
+
+    def contextual_forward(
+        self,
+        query_states: torch.Tensor,
+        query_freqs_cis: Optional[torch.Tensor],
+        context_states: Optional[Sequence[torch.Tensor] | torch.Tensor] = None,
+        context_freqs_cis: Optional[Sequence[torch.Tensor] | torch.Tensor] = None,
+        adaln_input: Optional[torch.Tensor] = None,
+        attn_params: Optional[AttentionParams] = None,
+        include_query_in_kv: bool = True,
+    ) -> torch.Tensor:
+        context_list = self._normalize_context_states(context_states)
+        context_freqs_list = self._normalize_context_freqs(context_freqs_cis, len(context_list))
+
+        modulation = self._get_modulation(adaln_input)
+        if modulation is None:
+            normalized_query = self._normalize_attention_input(query_states)
+            normalized_context = [self._normalize_attention_input(context) for context in context_list]
+            attn_out = self.attention.contextual_forward(
+                normalized_query,
+                context_states=normalized_context,
+                query_freqs_cis=query_freqs_cis,
+                context_freqs_cis=context_freqs_list,
+                attn_params=attn_params,
+                include_query_in_kv=include_query_in_kv,
+            )
+            return self._apply_attention_and_ffn(query_states, attn_out)
+
+        scale_msa, gate_msa, scale_mlp, gate_mlp = modulation
+        normalized_query = self._normalize_attention_input(query_states, scale_msa)
+        normalized_context = [self._normalize_attention_input(context, scale_msa) for context in context_list]
+        attn_out = self.attention.contextual_forward(
+            normalized_query,
+            context_states=normalized_context,
+            query_freqs_cis=query_freqs_cis,
+            context_freqs_cis=context_freqs_list,
+            attn_params=attn_params,
+            include_query_in_kv=include_query_in_kv,
+        )
+        return self._apply_attention_and_ffn(query_states, attn_out, scale_mlp=scale_mlp, gate_msa=gate_msa, gate_mlp=gate_mlp)
+
     def _forward(
         self,
         x: torch.Tensor,
@@ -392,25 +575,14 @@ class ZImageTransformerBlock(nn.Module):
         adaln_input: Optional[torch.Tensor] = None,
         attn_params: Optional[AttentionParams] = None,
     ):
-        if self.modulation:
-            assert adaln_input is not None
-            scale_msa, gate_msa, scale_mlp, gate_mlp = self.adaLN_modulation[0](adaln_input).unsqueeze(1).chunk(4, dim=2)
-            del adaln_input
-            gate_msa, gate_mlp = gate_msa.tanh(), gate_mlp.tanh()
-            scale_msa, scale_mlp = 1.0 + scale_msa, 1.0 + scale_mlp
+        modulation = self._get_modulation(adaln_input)
+        if modulation is None:
+            attn_out = self.attention(self._normalize_attention_input(x), freqs_cis=freqs_cis, attn_params=attn_params)
+            return self._apply_attention_and_ffn(x, attn_out)
 
-            attn_out = self.attention(self.attention_norm1(x) * scale_msa, freqs_cis=freqs_cis, attn_params=attn_params)
-            del scale_msa
-            x = x + gate_msa * self.attention_norm2(attn_out)
-            del gate_msa
-            x = x + gate_mlp * self.ffn_norm2(self.feed_forward(self.ffn_norm1(x) * scale_mlp))
-            del scale_mlp, gate_mlp
-        else:
-            attn_out = self.attention(self.attention_norm1(x), freqs_cis=freqs_cis, attn_params=attn_params)
-            x = x + self.attention_norm2(attn_out)
-            x = x + self.ffn_norm2(self.feed_forward(self.ffn_norm1(x)))
-
-        return x
+        scale_msa, gate_msa, scale_mlp, gate_mlp = modulation
+        attn_out = self.attention(self._normalize_attention_input(x, scale_msa), freqs_cis=freqs_cis, attn_params=attn_params)
+        return self._apply_attention_and_ffn(x, attn_out, scale_mlp=scale_mlp, gate_msa=gate_msa, gate_mlp=gate_mlp)
 
     def forward(
         self,
@@ -731,6 +903,13 @@ class ZImageTransformer2DModel(nn.Module):
             return
         self.offloader.prepare_block_devices_before_forward(self.layers)
 
+    def prepare_adaln_input(self, t: torch.Tensor, reference_dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+        t = t * self.t_scale
+        adaln_input = self.t_embedder(t)
+        if reference_dtype is not None:
+            adaln_input = adaln_input.to(reference_dtype)
+        return adaln_input
+
     def unpatchify(self, x: torch.Tensor, size: Tuple[int, int, int], patch_size: int, f_patch_size: int) -> torch.Tensor:
         """
         Unpatchify the latent tensor back to image/video format.
@@ -826,6 +1005,165 @@ class ZImageTransformer2DModel(nn.Module):
         # Caption positions: (i + 1, 0, 0) for i in range(cap_seq_len). [cap_seq_len, 3]
         return self.create_coordinate_grid(size=(cap_seq_len, 1, 1), start=(1, 0, 0), device=device).flatten(0, 2)
 
+    def prepare_image_tokens(
+        self,
+        x: torch.Tensor,
+        cap_seq_len: int,
+        patch_size: int = 2,
+        f_patch_size: int = 1,
+        adaln_input: Optional[torch.Tensor] = None,
+        apply_noise_refiner: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict]:
+        assert patch_size in self.all_patch_size
+        assert f_patch_size in self.all_f_patch_size
+
+        B, C, F_size, H_size, W_size = x.shape
+        device = x.device
+
+        pH = pW = patch_size
+        pF = f_patch_size
+        F_tokens, H_tokens, W_tokens = F_size // pF, H_size // pH, W_size // pW
+        x_seq_len = F_tokens * H_tokens * W_tokens
+
+        x_tokens = self.patchify(x, patch_size, f_patch_size)
+        x_tokens = self.all_x_embedder[f"{patch_size}-{f_patch_size}"](x_tokens)
+
+        x_pos_ids = self.create_image_position_ids(F_tokens, H_tokens, W_tokens, cap_seq_len, device)
+        x_freqs_cis = self.rope_embedder(x_pos_ids)
+        x_freqs_cis = x_freqs_cis.unsqueeze(0).expand(B, -1, -1)
+
+        if apply_noise_refiner:
+            if adaln_input is None:
+                raise ValueError("adaln_input is required when apply_noise_refiner=True")
+            adaln_input = adaln_input.type_as(x_tokens)
+            noise_refiner_attn_params = AttentionParams.create_attention_params_from_mask(self.attn_mode, self.split_attn, 0, None)
+            for layer in self.noise_refiner:
+                x_tokens = layer(x_tokens, x_freqs_cis, adaln_input, attn_params=noise_refiner_attn_params)
+
+        metadata = {
+            "image_shape": (F_size, H_size, W_size),
+            "token_shape": (F_tokens, H_tokens, W_tokens),
+            "seq_len": x_seq_len,
+            "patch_size": patch_size,
+            "f_patch_size": f_patch_size,
+        }
+        return x_tokens, x_freqs_cis, metadata
+
+    def prepare_caption_tokens(
+        self,
+        cap_feats: torch.Tensor,
+        cap_mask: Optional[torch.Tensor],
+        apply_context_refiner: bool = True,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        device = cap_feats.device
+        cap_seq_len = cap_feats.shape[1]
+
+        cap_feats = self.cap_embedder(cap_feats)
+        if cap_mask is not None:
+            cap_pad_mask = ~cap_mask
+            cap_feats = cap_feats.masked_fill(cap_pad_mask.unsqueeze(-1), 0.0)
+            cap_feats = cap_feats + self.cap_pad_token * cap_pad_mask.unsqueeze(-1).float()
+
+        cap_pos_ids = self.create_caption_position_ids(cap_seq_len, device)
+        cap_freqs_cis = self.rope_embedder(cap_pos_ids)
+        cap_freqs_cis = cap_freqs_cis.unsqueeze(0).expand(cap_feats.shape[0], -1, -1)
+
+        if apply_context_refiner:
+            context_refiner_attn_params = AttentionParams.create_attention_params_from_mask(
+                self.attn_mode, self.split_attn, 0, cap_mask
+            )
+            for layer in self.context_refiner:
+                cap_feats = layer(cap_feats, cap_freqs_cis, attn_params=context_refiner_attn_params)
+
+        return cap_feats, cap_freqs_cis
+
+    @staticmethod
+    def build_unified_tokens(
+        x_tokens: torch.Tensor,
+        x_freqs_cis: torch.Tensor,
+        cap_tokens: torch.Tensor,
+        cap_freqs_cis: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        unified = torch.cat([x_tokens, cap_tokens], dim=1)
+        unified_freqs_cis = torch.cat([x_freqs_cis, cap_freqs_cis], dim=1)
+        return unified, unified_freqs_cis
+
+    @staticmethod
+    def split_unified_tokens(unified: torch.Tensor, x_seq_len: int) -> tuple[torch.Tensor, torch.Tensor]:
+        return unified[:, :x_seq_len], unified[:, x_seq_len:]
+
+    @staticmethod
+    def _coerce_token_indices(token_indices: Sequence[int] | torch.Tensor, device: torch.device) -> torch.Tensor:
+        if isinstance(token_indices, torch.Tensor):
+            indices = token_indices.to(device=device, dtype=torch.long)
+        else:
+            indices = torch.tensor(list(token_indices), device=device, dtype=torch.long)
+        return indices
+
+    def select_token_subset(
+        self,
+        tokens: torch.Tensor,
+        token_indices: Sequence[int] | torch.Tensor,
+        freqs_cis: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        indices = self._coerce_token_indices(token_indices, tokens.device)
+        subset_tokens = tokens.index_select(1, indices)
+        if freqs_cis is None:
+            return subset_tokens, None
+        subset_freqs = freqs_cis.index_select(1, indices)
+        return subset_tokens, subset_freqs
+
+    def replace_token_subset(
+        self,
+        tokens: torch.Tensor,
+        token_indices: Sequence[int] | torch.Tensor,
+        replacement_tokens: torch.Tensor,
+    ) -> torch.Tensor:
+        indices = self._coerce_token_indices(token_indices, tokens.device)
+        updated = tokens.clone()
+        updated.index_copy_(1, indices, replacement_tokens)
+        return updated
+
+    def create_main_attention_params(self, x_seq_len: int, cap_mask: Optional[torch.Tensor]) -> AttentionParams:
+        return AttentionParams.create_attention_params_from_mask(self.attn_mode, self.split_attn, x_seq_len, cap_mask)
+
+    def run_main_layers(
+        self,
+        unified: torch.Tensor,
+        unified_freqs_cis: torch.Tensor,
+        adaln_input: torch.Tensor,
+        cap_mask: Optional[torch.Tensor],
+        x_seq_len: int,
+        start_layer: int = 0,
+        end_layer: Optional[int] = None,
+    ) -> torch.Tensor:
+        if end_layer is None:
+            end_layer = len(self.layers)
+
+        attn_params = self.create_main_attention_params(x_seq_len, cap_mask)
+        for index in range(start_layer, end_layer):
+            layer = self.layers[index]
+            if self.blocks_to_swap:
+                self.offloader.wait_for_block(index)
+
+            unified = layer(unified, unified_freqs_cis, adaln_input, attn_params=attn_params)
+
+            if self.blocks_to_swap:
+                self.offloader.submit_move_blocks_forward(self.layers, index)
+
+        return unified
+
+    def finalize_image_tokens(
+        self,
+        unified: torch.Tensor,
+        adaln_input: torch.Tensor,
+        image_size: tuple[int, int, int],
+        patch_size: int = 2,
+        f_patch_size: int = 1,
+    ) -> torch.Tensor:
+        unified = self.all_final_layer[f"{patch_size}-{f_patch_size}"](unified, adaln_input)
+        return self.unpatchify(unified, image_size, patch_size, f_patch_size)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -856,79 +1194,24 @@ class ZImageTransformer2DModel(nn.Module):
         device = x.device
         cap_seq_len = cap_feats.shape[1]
 
-        # Timestep embedding
-        t = t * self.t_scale  # 0-1 to 0-1000
-        adaln_input = self.t_embedder(t)
-
-        # Patchify and embed x
-        pH = pW = patch_size
-        pF = f_patch_size
-        F_tokens, H_tokens, W_tokens = F_size // pF, H_size // pH, W_size // pW
-        x_seq_len = F_tokens * H_tokens * W_tokens
-
-        x = self.patchify(x, patch_size, f_patch_size)  # [B, x_seq_len, patch_dim]
-        x = self.all_x_embedder[f"{patch_size}-{f_patch_size}"](x)  # [B, x_seq_len, dim]
-
-        adaln_input = adaln_input.type_as(x)
-
-        # Create position IDs and RoPE for x (same for all samples since images have same size)
-        x_pos_ids = self.create_image_position_ids(F_tokens, H_tokens, W_tokens, cap_seq_len, device)
-        x_freqs_cis = self.rope_embedder(x_pos_ids)  # [x_seq_len, head_dim]
-        del x_pos_ids
-        x_freqs_cis = x_freqs_cis.unsqueeze(0).expand(B, -1, -1)  # [B, x_seq_len, head_dim]
-
-        # Apply noise refiner
-        noise_refiner_attn_params = AttentionParams.create_attention_params_from_mask(self.attn_mode, self.split_attn, 0, None)
-        for layer in self.noise_refiner:
-            x = layer(x, x_freqs_cis, adaln_input, attn_params=noise_refiner_attn_params)
-
-        # Embed caption features
-        cap_feats = self.cap_embedder(cap_feats)  # [B, cap_seq_len, dim]
-
-        # Apply cap_pad_token to masked positions
-        if cap_mask is not None:
-            cap_pad_mask = ~cap_mask  # True for padding positions
-            cap_feats = cap_feats.masked_fill(cap_pad_mask.unsqueeze(-1), 0.0)
-            cap_feats = cap_feats + self.cap_pad_token * cap_pad_mask.unsqueeze(-1).float()
-
-        # Create position IDs and RoPE for captions
-        cap_pos_ids = self.create_caption_position_ids(cap_seq_len, device)
-        cap_freqs_cis = self.rope_embedder(cap_pos_ids)  # [cap_seq_len, head_dim]
-        del cap_pos_ids
-        cap_freqs_cis = cap_freqs_cis.unsqueeze(0).expand(B, -1, -1)  # [B, cap_seq_len, head_dim]
-
-        # Apply context refiner
-        context_refiner_attn_params = AttentionParams.create_attention_params_from_mask(
-            self.attn_mode, self.split_attn, 0, cap_mask
+        adaln_input = self.prepare_adaln_input(t)
+        x_tokens, x_freqs_cis, x_meta = self.prepare_image_tokens(
+            x,
+            cap_seq_len=cap_seq_len,
+            patch_size=patch_size,
+            f_patch_size=f_patch_size,
+            adaln_input=adaln_input,
         )
-        for layer in self.context_refiner:
-            cap_feats = layer(cap_feats, cap_freqs_cis, attn_params=context_refiner_attn_params)
+        adaln_input = adaln_input.type_as(x_tokens)
+        cap_tokens, cap_freqs_cis = self.prepare_caption_tokens(cap_feats, cap_mask)
+        unified, unified_freqs_cis = self.build_unified_tokens(x_tokens, x_freqs_cis, cap_tokens, cap_freqs_cis)
 
-        # Concatenate x and cap_feats for unified processing
-        # Order: [x tokens, caption tokens]
-        unified = torch.cat([x, cap_feats], dim=1)  # [B, x_seq_len + cap_seq_len, dim]
-        del x, cap_feats
-        unified_freqs_cis = torch.cat([x_freqs_cis, cap_freqs_cis], dim=1)  # [B, x_seq_len + cap_seq_len, head_dim]
-        del x_freqs_cis, cap_freqs_cis
-
-        # Apply main transformer layers
-        attn_params = AttentionParams.create_attention_params_from_mask(self.attn_mode, self.split_attn, x_seq_len, cap_mask)
-        for index, layer in enumerate(self.layers):
-            if self.blocks_to_swap:
-                self.offloader.wait_for_block(index)
-
-            unified = layer(unified, unified_freqs_cis, adaln_input, attn_params=attn_params)
-
-            if self.blocks_to_swap:
-                self.offloader.submit_move_blocks_forward(self.layers, index)
+        x_seq_len = x_meta["seq_len"]
+        unified = self.run_main_layers(unified, unified_freqs_cis, adaln_input, cap_mask, x_seq_len)
 
         unified = unified.to(device)  # ensure unified is on the correct device when activation CPU offloading is used
 
-        # Apply final layer
-        unified = self.all_final_layer[f"{patch_size}-{f_patch_size}"](unified, adaln_input)
-
-        # Unpatchify (takes only the first x_seq_len tokens)
-        x = self.unpatchify(unified, (F_size, H_size, W_size), patch_size, f_patch_size)
+        x = self.finalize_image_tokens(unified, adaln_input, (F_size, H_size, W_size), patch_size, f_patch_size)
 
         return x
 

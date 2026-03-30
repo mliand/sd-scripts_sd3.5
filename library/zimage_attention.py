@@ -1,8 +1,9 @@
 # Unified attention function supporting various implementations
 
 from dataclasses import dataclass
+from typing import Optional, Sequence, Union
+
 import torch
-from typing import Optional, Union
 
 try:
     import flash_attn
@@ -265,3 +266,39 @@ def attention(
         x = torch.nn.functional.pad(x, (0, 0, 0, attn_params.max_seqlen - x.shape[1]), value=0)  # pad back to max_seqlen
 
     return x
+
+
+def contextual_attention(
+    q: torch.Tensor,
+    context: Optional[Sequence[torch.Tensor] | torch.Tensor] = None,
+    attn_params: Optional[AttentionParams] = None,
+    drop_rate: float = 0.0,
+    include_query_in_kv: bool = True,
+) -> torch.Tensor:
+    """
+    Contextual attention helper for LayerBind-style local query updates.
+
+    Args:
+        q: Query tensor with shape [B, Lq, H, D].
+        context: One or more context tensors with shape [B, Lc, H, D].
+        attn_params: Optional attention parameters.
+        drop_rate: Attention dropout rate.
+        include_query_in_kv: When true, append q to the KV stream before attention.
+
+    Returns:
+        Attention output tensor with shape [B, Lq, H*D].
+    """
+    if context is None:
+        context_list = []
+    elif isinstance(context, torch.Tensor):
+        context_list = [context]
+    else:
+        context_list = list(context)
+
+    kv_parts = [q] if include_query_in_kv else []
+    kv_parts.extend(context_list)
+    if not kv_parts:
+        raise ValueError("contextual_attention requires q in kv or at least one context tensor")
+
+    kv = torch.cat(kv_parts, dim=1) if len(kv_parts) > 1 else kv_parts[0]
+    return attention(q, kv, kv, attn_params=attn_params, drop_rate=drop_rate)
