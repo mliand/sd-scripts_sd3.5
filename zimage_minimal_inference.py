@@ -1003,18 +1003,18 @@ def run_layerbind_forward(
                 )
                 region_injection_scale = 1.0 if region_state.get("is_occluding", False) else 0.60
                 local_tokens = region_tokens.lerp(local_tokens, float(phase2_delta_scale) * region_injection_scale)
-                text_include_query = include_query_in_kv
+                text_include_query = False
                 text_segment_biases = build_layerbind_segment_logit_biases(
                     include_query_in_kv=text_include_query,
                     query_length=region_state["text_tokens"].shape[1],
-                    context_lengths=[local_tokens.shape[1], cap_tokens_current.shape[1]],
-                    context_roles=["branch", "scene_text"],
+                    context_lengths=[local_tokens.shape[1]],
+                    context_roles=["branch"],
                 )
                 region_state["text_tokens"] = layer.contextual_forward(
                     region_state["text_tokens"],
                     region_condition["freqs"],
-                    context_states=[local_tokens, cap_tokens_current],
-                    context_freqs_cis=[region_freqs, cap_freqs_current],
+                    context_states=[local_tokens],
+                    context_freqs_cis=[region_freqs],
                     adaln_input=adaln_input,
                     include_query_in_kv=text_include_query,
                     segment_logit_biases=text_segment_biases,
