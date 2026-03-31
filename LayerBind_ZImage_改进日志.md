@@ -29,6 +29,29 @@
 ### 2026-03-31 / `pending`
 
 - 背景问题：
+  - `t1` 诊断结果表明：region 内灰色/彩色色块在 `Phase1/t1 blend` 时就已被写入 initialized latent。
+  - 同时 `binary/alpha mask` 呈现明显碎块化，并将这些脏区域一并纳入前景写回。
+  - 这说明当前在 Z-Image 上，论文 A.2 的 `branch-global diff -> foreground alpha` 前提失效，不能再让 diff 直接主导整张前景 mask。
+- 改动点：
+  - 在 `t1 blend` 中引入 `core-first blend`：
+    - 先基于 bbox 几何中心生成稳定的 region core seed
+    - 再只保留与该核心连通的 diff-mask 连通域
+    - 最终让 diff 负责边界微调，而不是决定整张前景 mask
+  - 该策略仅应用于 `Phase1/t1 blend`，不改变 `Phase2` 的 alpha 估计逻辑。
+  - 新增测试：验证 `core-first` 会去掉不与 bbox 核心连通的碎片 mask。
+- 预期收益：
+  - 从 `t1` 源头减少被误写回的碎色块区域。
+  - 保留主体核心区域，同时让边界继续依赖 diff 细化。
+- 已知风险：
+  - 若主体本身偏离 bbox 中心较多，core-first 可能误删真实前景。
+  - 当前核心种子仍是几何先验，对极端构图不一定稳健。
+- 验证方式/结果：
+  - 本地执行静态校验。
+  - 单元测试仍受当前环境是否具备 `torch` 限制。
+
+### 2026-03-31 / `pending`
+
+- 背景问题：
   - 当前多轮 `Phase2` 改动都只能轻微改善融合自然度，但无法显著减少 region 内灰色/彩色色块。
   - 需要先验证这些色块是否在 `t1` 初始化阶段就已经被写入全局 latent，而不是继续盲改 `Phase2`。
 - 改动点：

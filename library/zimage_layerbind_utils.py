@@ -289,6 +289,79 @@ def _morphology_refine(mask: torch.Tensor) -> torch.Tensor:
     return _binary_dilate(opened, iterations=1)
 
 
+def _morphological_reconstruct(seed: torch.Tensor, mask: torch.Tensor, max_iters: int = 32) -> torch.Tensor:
+    seed = (seed > 0).float()
+    mask = (mask > 0).float()
+    current = seed * mask
+    for _ in range(max_iters):
+        expanded = _binary_dilate(current, iterations=1) * mask
+        if torch.equal((expanded > 0), (current > 0)):
+            break
+        current = expanded
+    return current
+
+
+def _build_region_core_mask(
+    token_indices: Sequence[int] | torch.Tensor,
+    token_shape: tuple[int, int, int],
+    device: torch.device,
+    core_ratio: float = 0.5,
+) -> torch.Tensor:
+    _, token_height, token_width = token_shape
+    if isinstance(token_indices, torch.Tensor):
+        indices = token_indices.to(device=device, dtype=torch.long)
+    else:
+        indices = torch.tensor(list(token_indices), device=device, dtype=torch.long)
+
+    mask = torch.zeros((1, 1, token_height, token_width), device=device, dtype=torch.float32)
+    if indices.numel() == 0:
+        return mask
+
+    y = torch.div(indices, token_width, rounding_mode="floor")
+    x = indices.remainder(token_width)
+    x1 = int(x.min().item())
+    x2 = int(x.max().item()) + 1
+    y1 = int(y.min().item())
+    y2 = int(y.max().item()) + 1
+
+    width = max(1, x2 - x1)
+    height = max(1, y2 - y1)
+    core_ratio = float(max(0.2, min(core_ratio, 1.0)))
+    core_width = max(1, round(width * core_ratio))
+    core_height = max(1, round(height * core_ratio))
+    core_x1 = x1 + max(0, (width - core_width) // 2)
+    core_y1 = y1 + max(0, (height - core_height) // 2)
+    core_x2 = min(x2, core_x1 + core_width)
+    core_y2 = min(y2, core_y1 + core_height)
+    mask[:, :, core_y1:core_y2, core_x1:core_x2] = 1.0
+    return mask
+
+
+def refine_alpha_mask_with_region_core(
+    alpha_map: torch.Tensor,
+    binary_mask: torch.Tensor,
+    token_indices: Sequence[int] | torch.Tensor,
+    token_shape: tuple[int, int, int],
+    core_ratio: float = 0.5,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    core_mask = _build_region_core_mask(token_indices, token_shape, binary_mask.device, core_ratio=core_ratio)
+    seed = binary_mask * core_mask
+    if seed.amax().item() <= 0:
+        seed = binary_mask * _binary_dilate(core_mask, iterations=1)
+    if seed.amax().item() <= 0:
+        seed = binary_mask * _binary_dilate(core_mask, iterations=2)
+    if seed.amax().item() <= 0:
+        return alpha_map, binary_mask
+
+    reconstructed = _morphological_reconstruct(seed, binary_mask)
+    if reconstructed.amax().item() <= 0:
+        return alpha_map, binary_mask
+
+    refined_binary = _morphology_refine(reconstructed)
+    refined_alpha = alpha_map * refined_binary
+    return refined_alpha, refined_binary
+
+
 def estimate_alpha_from_token_difference(
     branch_tokens: torch.Tensor,
     current_tokens: torch.Tensor,
@@ -297,6 +370,7 @@ def estimate_alpha_from_token_difference(
     gamma: float = 0.90,
     poisson_lambda: float = 0.50,
     return_binary_mask: bool = False,
+    core_first: bool = False,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     if branch_tokens.shape != current_tokens.shape:
         raise ValueError(
@@ -350,7 +424,15 @@ def estimate_alpha_from_token_difference(
         tightened_binary = _binary_erode(binary, iterations=1)
         if tightened_binary.amax().item() > 0:
             binary = tightened_binary
-        refined = alpha_map[batch_index : batch_index + 1] * binary
+        refined = alpha_map[batch_index : batch_index + 1]
+        if core_first:
+            refined, binary = refine_alpha_mask_with_region_core(
+                refined,
+                binary,
+                token_indices,
+                token_shape,
+            )
+        refined = refined * binary
         if refined.amax().item() <= 1e-6:
             refined = alpha_map[batch_index : batch_index + 1]
         refined = refined / refined.amax().clamp(min=1e-6)

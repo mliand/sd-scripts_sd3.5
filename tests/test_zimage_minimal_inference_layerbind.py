@@ -487,6 +487,29 @@ def test_select_phase2_query_positions_prefers_alpha_foreground():
     assert torch.equal(selected, torch.tensor([0, 1], dtype=torch.long))
 
 
+def test_refine_alpha_mask_with_region_core_keeps_center_connected_component():
+    alpha_map = torch.tensor(
+        [[[[0.0, 0.0, 0.0], [0.0, 1.0, 1.0], [1.0, 0.0, 0.0]]]],
+        dtype=torch.float32,
+    )
+    binary_mask = torch.tensor(
+        [[[[0.0, 0.0, 0.0], [0.0, 1.0, 1.0], [1.0, 0.0, 0.0]]]],
+        dtype=torch.float32,
+    )
+    refined_alpha, refined_binary = zimage_minimal_inference.zimage_layerbind_utils.refine_alpha_mask_with_region_core(
+        alpha_map,
+        binary_mask,
+        token_indices=torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8], dtype=torch.long),
+        token_shape=(1, 3, 3),
+        core_ratio=0.5,
+    )
+
+    assert refined_binary[0, 0, 1, 1].item() == 1.0
+    assert refined_binary[0, 0, 1, 2].item() == 1.0
+    assert refined_binary[0, 0, 2, 0].item() == 0.0
+    assert refined_alpha[0, 0, 2, 0].item() == 0.0
+
+
 def test_phase1_resets_region_text_tokens_from_prompt_each_timestep(monkeypatch):
     transformer = create_tiny_zimage_model()
     device = torch.device("cpu")

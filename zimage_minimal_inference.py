@@ -672,6 +672,7 @@ def blend_region_tokens(
                     gamma=gamma,
                     poisson_lambda=poisson_lambda,
                     return_binary_mask=True,
+                    core_first=True,
                 )
                 region_state["region_mask"] = binary_mask
                 # Preserve the shared global background for non-occluding layers and only
@@ -687,6 +688,7 @@ def blend_region_tokens(
                 gamma=gamma,
                 poisson_lambda=poisson_lambda,
                 return_binary_mask=True,
+                core_first=True,
             )
             region_state["region_mask"] = binary_mask
             region_state["alpha_mask"] = alpha_mask
