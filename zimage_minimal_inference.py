@@ -304,13 +304,24 @@ def prepare_layerbind_conditions(
 
 def prepare_region_runtime_states(layout, x_seq_len: int, device: torch.device):
     all_indices = torch.arange(x_seq_len, device=device, dtype=torch.long)
-    states = []
+    all_region_mask = torch.zeros(x_seq_len, dtype=torch.bool, device=device)
+    per_region_indices: list[torch.Tensor] = []
     for region in layout.regions:
         indices = torch.tensor(region.token_indices, device=device, dtype=torch.long)
+        if indices.numel() > 0:
+            all_region_mask[indices] = True
+        per_region_indices.append(indices)
+
+    states = []
+    for region, indices in zip(layout.regions, per_region_indices):
         keep_mask = torch.ones(x_seq_len, dtype=torch.bool, device=device)
         if indices.numel() > 0:
             keep_mask[indices] = False
         background_indices = all_indices[keep_mask]
+        foreign_region_mask = all_region_mask.clone()
+        if indices.numel() > 0:
+            foreign_region_mask[indices] = False
+        foreign_region_indices = all_indices[foreign_region_mask]
         region_mask = torch.ones((1, indices.numel(), 1), device=device, dtype=torch.float32)
         states.append(
             {
@@ -319,6 +330,7 @@ def prepare_region_runtime_states(layout, x_seq_len: int, device: torch.device):
                 "prompt": region.region_prompt,
                 "indices": indices,
                 "background_indices": background_indices,
+                "foreign_region_indices": foreign_region_indices,
                 "branch_patches": None,
                 "branch_tokens": None,
                 "text_tokens": None,
@@ -334,6 +346,7 @@ def build_layerbind_local_context_indices(
     token_shape: tuple[int, int, int],
     seq_len: int,
     device: torch.device,
+    forbidden_indices: Optional[torch.Tensor] = None,
     radius: int = 8,
     global_anchor_count: int = 32,
 ) -> torch.Tensor:
@@ -362,11 +375,14 @@ def build_layerbind_local_context_indices(
     all_indices = torch.arange(seq_len, device=device, dtype=torch.long)
     region_mask = torch.zeros(seq_len, device=device, dtype=torch.bool)
     region_mask[region_indices] = True
+    forbidden_mask = torch.zeros(seq_len, device=device, dtype=torch.bool)
+    if forbidden_indices is not None and forbidden_indices.numel() > 0:
+        forbidden_mask[forbidden_indices] = True
     local_mask = torch.zeros(seq_len, device=device, dtype=torch.bool)
     local_mask[local_rect_indices] = True
 
-    local_background = all_indices[local_mask & ~region_mask]
-    global_candidates = all_indices[~local_mask & ~region_mask]
+    local_background = all_indices[local_mask & ~region_mask & ~forbidden_mask]
+    global_candidates = all_indices[~local_mask & ~region_mask & ~forbidden_mask]
 
     if global_anchor_count > 0 and global_candidates.numel() > 0:
         if global_candidates.numel() <= global_anchor_count:
@@ -383,6 +399,8 @@ def build_layerbind_local_context_indices(
         anchors = torch.zeros((0,), device=device, dtype=torch.long)
 
     context_indices = torch.cat([local_background, anchors], dim=0)
+    if context_indices.numel() == 0:
+        context_indices = all_indices[~region_mask & ~forbidden_mask]
     if context_indices.numel() == 0:
         context_indices = all_indices[~region_mask]
     return torch.unique(context_indices, sorted=True)
@@ -404,11 +422,11 @@ def build_layerbind_segment_logit_biases(
     for length, role in zip(context_lengths, context_roles):
         bias = -math.log(max(int(length), 1))
         if role == "text":
-            bias += 1.6
+            bias += 1.0
         elif role == "scene_text":
-            bias += 0.8
+            bias += 0.2
         elif role == "branch":
-            bias += 0.5
+            bias += 0.2
         elif role == "local_global":
             bias += 0.0
         biases.append(bias)
@@ -782,6 +800,9 @@ def run_layerbind_forward(
                 token_shape=x_meta["token_shape"],
                 seq_len=x_meta["seq_len"],
                 device=x_tokens.device,
+                forbidden_indices=region_state.get("foreign_region_indices"),
+                radius=10,
+                global_anchor_count=64,
             )
             region_state["context_seq_len"] = x_meta["seq_len"]
 
@@ -957,20 +978,19 @@ def run_layerbind_forward(
                     context_lengths=[
                         region_state["text_tokens"].shape[1],
                         local_global_tokens.shape[1],
-                        cap_tokens_current.shape[1],
                     ],
-                    context_roles=["text", "local_global", "scene_text"],
+                    context_roles=["text", "local_global"],
                 )
                 local_tokens = layer.contextual_forward(
                     region_tokens,
                     region_freqs,
-                    context_states=[region_state["text_tokens"], local_global_tokens, cap_tokens_current],
-                    context_freqs_cis=[region_condition["freqs"], local_global_freqs, cap_freqs_current],
+                    context_states=[region_state["text_tokens"], local_global_tokens],
+                    context_freqs_cis=[region_condition["freqs"], local_global_freqs],
                     adaln_input=adaln_input,
                     include_query_in_kv=include_query_in_kv,
                     segment_logit_biases=local_segment_biases,
                 )
-                region_injection_scale = 1.0 if region_state.get("is_occluding", False) else 0.50
+                region_injection_scale = 1.0 if region_state.get("is_occluding", False) else 0.60
                 local_tokens = region_tokens.lerp(local_tokens, float(phase2_delta_scale) * region_injection_scale)
                 text_include_query = include_query_in_kv
                 text_segment_biases = build_layerbind_segment_logit_biases(
