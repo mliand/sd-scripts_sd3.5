@@ -436,7 +436,7 @@ def build_layerbind_segment_logit_biases(
         elif role == "text_anchor":
             bias += 1.25
         elif role == "phase1_text_anchor":
-            bias += 1.35
+            bias += 1.15
         elif role == "scene_text":
             bias += 0.2
         elif role == "branch":
@@ -446,7 +446,7 @@ def build_layerbind_segment_logit_biases(
         elif role == "local_global_sparse":
             bias -= 0.15
         elif role == "phase1_local_global_sparse":
-            bias -= 0.20
+            bias -= 0.05
         biases.append(bias)
 
     return biases
@@ -961,7 +961,7 @@ def run_layerbind_forward(
                     include_query_in_kv=text_include_query,
                     query_length=region_state["text_tokens"].shape[1],
                     context_lengths=[region_state["branch_tokens"].shape[1], local_background_tokens.shape[1]],
-                    context_roles=["branch", "phase1_local_global_sparse"],
+                    context_roles=["branch", "local_global"],
                 )
                 region_state["text_tokens"] = layer.contextual_forward(
                     region_state["text_tokens"],

@@ -29,6 +29,25 @@
 ### 2026-03-31 / `pending`
 
 - 背景问题：
+  - 当前三块 region 独立性偏强，region 内局部背景和主背景有明显割裂感。
+  - 这更像 `Phase1` 锚定过强、背景竞争过弱导致的过度解耦，而不是位置约束不足。
+- 改动点：
+  - 将 `phase1_text_anchor` 从更强值回调。
+  - 将 `phase1_local_global_sparse` 的抑制减弱，把更多背景上下文重新引回 `Phase1`。
+  - `Phase1` 的 `text_tokens` 更新路径恢复使用普通 `local_global`，不再继续压低背景项。
+  - 示例 layout 的 `eta1` 从 `0.20` 进一步下调到 `0.18`，继续缓解过长 `Phase1` 带来的解耦。
+- 预期收益：
+  - 减轻 region 像“孤岛”一样独立的问题。
+  - 改善 region background 与主背景之间的连续性。
+- 已知风险：
+  - 若回调过头，跨 region 污染可能重新上升。
+- 验证方式/结果：
+  - 本地会执行静态校验。
+  - `pytest` 仍受当前环境缺少 `torch` 限制。
+
+### 2026-03-31 / `pending`
+
+- 背景问题：
   - 在当前稳定基线下，纯 `background_condition` 主导的 `Phase1` 全局路径有利于背景连续，但主体语义仍可能偏弱。
   - 直接切到纯 `scene_condition` 之前已经验证会打坏稳定性，因此只能做轻量注入。
 - 改动点：
