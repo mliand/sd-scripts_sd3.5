@@ -82,3 +82,21 @@ def test_estimate_alpha_from_token_difference_highlights_changed_tokens():
     assert alpha.shape == (1, 2, 1)
     assert alpha[0, 0, 0].item() > alpha[0, 1, 0].item()
     assert 0.0 <= alpha[0, 0, 0].item() <= 1.0
+
+
+def test_estimate_alpha_from_token_difference_can_return_binary_region_mask():
+    current = torch.zeros(1, 2, 4)
+    branch = current.clone()
+    branch[:, 0] = 2.0
+
+    alpha, binary = estimate_alpha_from_token_difference(
+        branch,
+        current,
+        token_indices=[0, 1],
+        token_shape=(1, 2, 2),
+        return_binary_mask=True,
+    )
+
+    assert alpha.shape == (1, 2, 1)
+    assert binary.shape == (1, 2, 1)
+    assert binary.dtype == alpha.dtype

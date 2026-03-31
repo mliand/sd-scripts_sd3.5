@@ -524,20 +524,28 @@ def blend_region_tokens(
             continue
 
         current = blended.index_select(1, indices)
-        if blend_mode == "direct" or order == 0:
+        if blend_mode == "direct":
             update = branch_tokens
             region_state["alpha_mask"] = None
+            region_state["region_mask"] = torch.ones_like(branch_tokens[:, :, :1])
         else:
-            alpha_mask = zimage_layerbind_utils.estimate_alpha_from_token_difference(
+            alpha_mask, binary_mask = zimage_layerbind_utils.estimate_alpha_from_token_difference(
                 branch_tokens,
                 current,
                 indices,
                 token_shape=token_shape,
                 gamma=gamma,
                 poisson_lambda=poisson_lambda,
+                return_binary_mask=True,
             )
-            region_state["alpha_mask"] = alpha_mask
-            update = alpha_mask * branch_tokens + (1.0 - alpha_mask) * current
+            region_state["region_mask"] = binary_mask
+            if order == 0:
+                # Bottom layer follows direct merge in Eq.9.
+                region_state["alpha_mask"] = None
+                update = branch_tokens
+            else:
+                region_state["alpha_mask"] = alpha_mask
+                update = alpha_mask * branch_tokens + (1.0 - alpha_mask) * current
 
         blended.index_copy_(1, indices, update)
     return blended

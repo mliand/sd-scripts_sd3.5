@@ -298,7 +298,8 @@ def estimate_alpha_from_token_difference(
     token_shape: tuple[int, int, int],
     gamma: float = 0.90,
     poisson_lambda: float = 0.50,
-) -> torch.Tensor:
+    return_binary_mask: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     if branch_tokens.shape != current_tokens.shape:
         raise ValueError(
             f"branch/current token shapes must match, got {tuple(branch_tokens.shape)} vs {tuple(current_tokens.shape)}"
@@ -309,30 +310,37 @@ def estimate_alpha_from_token_difference(
     diff = torch.linalg.vector_norm(branch_tokens - current_tokens, dim=-1)
     diff_map = _scatter_token_values(diff, token_indices, token_shape)
     region_mask = _scatter_token_mask(token_indices, token_shape, branch_tokens.device)
-    ring_mask = (region_mask - _binary_erode(region_mask, iterations=1)).clamp(min=0.0)
-    if ring_mask.max().item() <= 0:
-        ring_mask = region_mask
 
     score_map = torch.zeros_like(diff_map)
     flat_region_mask = region_mask.view(-1).bool()
-    flat_ring_mask = ring_mask.view(-1).bool()
     for batch_index in range(diff_map.shape[0]):
-        flat_diff = diff_map[batch_index].view(-1)
-        bg_values = flat_diff[flat_ring_mask]
-        if bg_values.numel() == 0:
-            bg_values = flat_diff[flat_region_mask]
-        if bg_values.numel() == 0:
+        batch_diff_map = diff_map[batch_index : batch_index + 1]
+        flat_diff = batch_diff_map.view(-1)
+        region_values = flat_diff[flat_region_mask]
+        if region_values.numel() == 0:
             continue
+
+        # Coarse foreground from branch-global difference, then use its surrounding ring as local background.
+        coarse_threshold = _otsu_threshold(region_values)
+        coarse_fg = ((batch_diff_map >= coarse_threshold).float() * region_mask).float()
+        surrounding_bg = (_binary_dilate(coarse_fg, iterations=1) - coarse_fg).clamp(min=0.0) * region_mask
+        if surrounding_bg.amax().item() <= 0:
+            surrounding_bg = (region_mask - coarse_fg).clamp(min=0.0)
+
+        bg_values = flat_diff[surrounding_bg.view(-1).bool()]
+        if bg_values.numel() == 0:
+            bg_values = region_values
 
         median = bg_values.median()
         mad = (bg_values - median).abs().median()
         sigma_bg = (1.4826 * mad).clamp(min=1e-5)
-        score_map[batch_index : batch_index + 1] = ((diff_map[batch_index : batch_index + 1] / sigma_bg).pow(float(2.0 * gamma))) * region_mask
+        score_map[batch_index : batch_index + 1] = ((batch_diff_map / sigma_bg).pow(float(2.0 * gamma))) * region_mask
 
     alpha_map = _screened_poisson_smooth(score_map, poisson_lambda=poisson_lambda)
     alpha_map = alpha_map * region_mask
 
     alpha_tokens = []
+    binary_tokens = []
     flat_alpha = alpha_map.view(alpha_map.shape[0], -1)
     for batch_index in range(alpha_map.shape[0]):
         region_values = flat_alpha[batch_index][flat_region_mask]
@@ -344,10 +352,16 @@ def estimate_alpha_from_token_difference(
             refined = alpha_map[batch_index : batch_index + 1]
         refined = refined / refined.amax().clamp(min=1e-6)
         alpha_tokens.append(refined.view(-1)[flat_region_mask])
+        binary_tokens.append(binary.view(-1)[flat_region_mask])
 
     alpha = torch.stack(alpha_tokens, dim=0).to(dtype=branch_tokens.dtype, device=branch_tokens.device)
     alpha = alpha.clamp_(0.0, 1.0).unsqueeze(-1)
-    return alpha
+    if not return_binary_mask:
+        return alpha
+
+    binary_mask = torch.stack(binary_tokens, dim=0).to(dtype=branch_tokens.dtype, device=branch_tokens.device)
+    binary_mask = (binary_mask > 0).to(dtype=branch_tokens.dtype).unsqueeze(-1)
+    return alpha, binary_mask
 
 
 def populate_region_token_indices(
