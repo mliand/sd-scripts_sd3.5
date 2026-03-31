@@ -433,12 +433,16 @@ def build_layerbind_segment_logit_biases(
         bias = -math.log(max(int(length), 1))
         if role == "text":
             bias += 1.0
+        elif role == "text_anchor":
+            bias += 1.25
         elif role == "scene_text":
             bias += 0.2
         elif role == "branch":
             bias += 0.2
         elif role == "local_global":
             bias += 0.0
+        elif role == "local_global_sparse":
+            bias -= 0.15
         biases.append(bias)
 
     return biases
@@ -989,7 +993,7 @@ def run_layerbind_forward(
                         region_state["text_tokens"].shape[1],
                         local_global_tokens.shape[1],
                     ],
-                    context_roles=["text", "local_global"],
+                    context_roles=["text_anchor", "local_global_sparse"],
                 )
                 local_tokens = layer.contextual_forward(
                     region_tokens,
