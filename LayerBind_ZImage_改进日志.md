@@ -21,9 +21,34 @@
 
 - 当前分支：`layerbind`
 - 最近一次关键提交：`7305997`
+- 当前工作树：已追加一轮未提交的 `Z-Image self-attn 路由收紧` 改动
 - 当前主线目标：减少 `region 与 background` 割裂、提升主体对齐。
 
 ## 4. 改进记录
+
+### 2026-03-31 / `pending`
+
+- 背景问题：
+  - `Z-Image` 采用共享式 `self-attention` 文本图像融合，不同于 `SD3/FLUX` 的双流结构。
+  - `Phase2` 中 region query 每层都从当前 `global_x_tokens[idx]` 重新取，会被 scene path 反复冲刷。
+  - region text 在循环内持续被 branch/local context 反写，容易把“条件锚点”改坏。
+  - `local_global_tokens` 若总是来自原始 `global_x_tokens`，会把更强的 scene object 语义直接带回 region 局部路径。
+- 改动点：
+  - `Phase2` region query 改为优先沿用 `region_state["branch_tokens"]`，不再每层重种到当前全局 region token。
+  - 去掉 `Phase1/Phase2` 对 `region_state["text_tokens"]` 的循环护理，region text 改为固定条件锚点。
+  - 段级 bias 新增 `text_anchor` 与 `local_global_sparse`，提升 region text 吸引力，压低共享图像上下文的竞争强度。
+  - `Phase2` 局部上下文改为读取当前顺序合成中的 `composed_x_tokens`，让上层 region 看到的是已被前序 region 校正过的图像上下文，而不是固定的 scene global snapshot。
+- 预期收益：
+  - 减少 middle region 被其它 region/global scene 语义抢占。
+  - 降低共享 self-attn 结构下的概念串区与条件漂移。
+  - 让 LSN 更接近“顺序路由修正”而不是“重复从 scene path 取局部重写”。
+- 已知风险：
+  - text anchor 偏置调强后，某些 prompt 下可能出现 region 填充感变重，需要继续观察。
+  - `Phase2` 仍未恢复完整独立 branch ODE，只是先把 query 轨迹与局部上下文路由收紧。
+- 验证方式/结果：
+  - 本地 `python -m py_compile zimage_minimal_inference.py tests/test_zimage_minimal_inference_layerbind.py` 通过。
+  - 新增回归测试：`test_phase2_keeps_region_branch_trajectory_and_freezes_text_tokens`。
+  - `pytest -q tests/test_zimage_minimal_inference_layerbind.py` 未执行成功，原因是当前环境缺少 `torch`，收集阶段即失败。
 
 ### 2026-03-31 / `7305997`
 
