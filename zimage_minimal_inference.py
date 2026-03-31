@@ -517,14 +517,26 @@ def blend_region_tokens(
 ):
     blended = x_tokens.clone()
     sorted_states = sorted(region_states, key=lambda item: item["layer_index"])
-    for order, region_state in enumerate(sorted_states):
+    occupied = torch.zeros(x_tokens.shape[1], device=x_tokens.device, dtype=torch.bool)
+    occluding_flags: list[bool] = []
+    for region_state in sorted_states:
+        indices = region_state["indices"]
+        if indices.numel() == 0:
+            occluding_flags.append(False)
+            continue
+        has_overlap = bool(occupied.index_select(0, indices).any().item())
+        occluding_flags.append(has_overlap)
+        occupied.index_fill_(0, indices, True)
+
+    for region_state, is_occluding in zip(sorted_states, occluding_flags):
         branch_tokens = region_state.get("branch_tokens")
         indices = region_state["indices"]
         if branch_tokens is None or indices.numel() == 0:
             continue
 
         current = blended.index_select(1, indices)
-        if blend_mode == "direct":
+        region_state["is_occluding"] = is_occluding
+        if blend_mode == "direct" or not is_occluding:
             update = branch_tokens
             region_state["alpha_mask"] = None
             region_state["region_mask"] = torch.ones_like(branch_tokens[:, :, :1])
@@ -539,13 +551,8 @@ def blend_region_tokens(
                 return_binary_mask=True,
             )
             region_state["region_mask"] = binary_mask
-            if order == 0:
-                # Bottom layer follows direct merge in Eq.9.
-                region_state["alpha_mask"] = None
-                update = branch_tokens
-            else:
-                region_state["alpha_mask"] = alpha_mask
-                update = alpha_mask * branch_tokens + (1.0 - alpha_mask) * current
+            region_state["alpha_mask"] = alpha_mask
+            update = alpha_mask * branch_tokens + (1.0 - alpha_mask) * current
 
         blended.index_copy_(1, indices, update)
     return blended
@@ -641,7 +648,6 @@ def run_layerbind_forward(
     blend_mode: str,
     gamma: float,
     poisson_lambda: float,
-    phase2_beta_scale: float,
     phase2_delta_scale: float,
     apply_phase1_blend: bool,
     layer_stats_accumulator: Optional[dict[str, Any]] = None,
@@ -1049,7 +1055,6 @@ def generate_image(
                     blend_mode=blend_mode,
                     gamma=layerbind_layout.config.gamma,
                     poisson_lambda=layerbind_layout.config.poisson_lambda,
-                    phase2_beta_scale=layerbind_layout.config.phase2_beta_scale,
                     phase2_delta_scale=layerbind_layout.config.phase2_delta_scale,
                     apply_phase1_blend=phase == "phase1" and (i + 1) == t1_step,
                     layer_stats_accumulator=layer_stats_accumulator,

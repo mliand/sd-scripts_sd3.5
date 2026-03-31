@@ -17,7 +17,6 @@ class LayerBindConfig:
     beta: float = 0.70
     gamma: float = 0.90
     poisson_lambda: float = 0.50
-    phase2_beta_scale: float = 0.35
     phase2_delta_scale: float = 0.50
     hard_binding_layers: list[int] = field(default_factory=list)
 
@@ -56,7 +55,6 @@ def layerbind_config_from_dict(data: Optional[dict[str, Any]]) -> LayerBindConfi
         "beta",
         "gamma",
         "poisson_lambda",
-        "phase2_beta_scale",
         "phase2_delta_scale",
     ):
         if key in data and data[key] is not None:

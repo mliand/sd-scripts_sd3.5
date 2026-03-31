@@ -37,7 +37,7 @@
 - `M` 已改为由 `Phase1` 的 branch-global 差分临时估计出的二值前景掩码（Otsu+morphology），不再固定为区域全 1。
   - 但仍是 token 网格空间估计，不是像素级实例分割。
 - `sigma_bg` 使用“估计前景周围背景（同 region 内环带）”做 MAD 近似，不是完整像素域采样。
-- `phase2_beta_scale` 参数仍在配置结构中，但当前 Phase2 合成主路径已不再使用它。
+- 已清理 `phase2_beta_scale` 的执行路径，Phase2 合成仅保留论文定义的 `alpha_o = beta * M`。
 
 ## 3. 对实际现象的解释（你近期看到的问题）
 
@@ -52,7 +52,7 @@
 
 1. 把 `M` 从 bbox 升级到实例级（至少引入更严格的 region 内前景筛选）。
 2. 针对 `1024x1024` 单独做 `eta1/eta2/beta/hard-binding-layers` 网格搜索并固化默认值。
-3. 清理无效参数（如 `phase2_beta_scale`）或明确标注“保留但当前未启用”。
+3. 继续补充高分辨率（1024）参数稳定性测试，确保不同 prompt 下都稳定。
 4. 固化回归集：固定 seed + layout + 10/30/60/80/100% debug 输出，避免回退到噪声区域问题。
 
 ## 5. 验证建议命令
