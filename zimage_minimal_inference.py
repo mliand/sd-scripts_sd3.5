@@ -786,6 +786,65 @@ def save_boxed_debug_image(image: Image.Image, layout, file_path: str):
     boxed.save(file_path)
 
 
+def save_layerbind_token_map(
+    token_values: torch.Tensor,
+    token_indices: torch.Tensor,
+    token_shape: tuple[int, int, int],
+    image_size: tuple[int, int],
+    file_path: str,
+):
+    _, token_height, token_width = token_shape
+    flat = torch.zeros(token_height * token_width, dtype=torch.float32)
+    if token_indices.numel() > 0 and token_values.numel() > 0:
+        values = token_values.detach().to(device="cpu", dtype=torch.float32).view(-1)
+        indices = token_indices.detach().to(device="cpu", dtype=torch.long)
+        flat.index_copy_(0, indices, values)
+
+    if flat.numel() > 0:
+        flat = flat - flat.min()
+        max_value = flat.max().item()
+        if max_value > 1e-6:
+            flat = flat / max_value
+
+    grid = (flat.view(token_height, token_width) * 255.0).clamp(0, 255).to(torch.uint8).numpy()
+    image = Image.fromarray(grid, mode="L").resize(image_size, Image.Resampling.NEAREST)
+    image.save(file_path)
+
+
+def save_layerbind_phase1_debug_maps(
+    region_states: list[dict[str, Any]],
+    image_size: tuple[int, int],
+    output_dir: str,
+    output_name: Optional[str],
+):
+    base_name = output_name or "layerbind"
+    for region_index, region_state in enumerate(region_states, start=1):
+        token_shape = region_state.get("token_shape")
+        indices = region_state.get("indices")
+        if token_shape is None or indices is None or indices.numel() == 0:
+            continue
+
+        region_mask = region_state.get("region_mask")
+        if region_mask is not None:
+            save_layerbind_token_map(
+                region_mask[0, :, 0],
+                indices,
+                token_shape,
+                image_size,
+                os.path.join(output_dir, f"{base_name}_t1_region_{region_index:02d}_binary_mask.png"),
+            )
+
+        alpha_mask = region_state.get("alpha_mask")
+        if alpha_mask is not None:
+            save_layerbind_token_map(
+                alpha_mask[0, :, 0],
+                indices,
+                token_shape,
+                image_size,
+                os.path.join(output_dir, f"{base_name}_t1_region_{region_index:02d}_alpha_mask.png"),
+            )
+
+
 def get_layerbind_debug_save_points(sample_steps: int, percents: tuple[int, ...] = (10, 30, 60, 80)) -> list[tuple[int, int]]:
     if sample_steps <= 0:
         return []
@@ -857,6 +916,7 @@ def run_layerbind_forward(
                 global_anchor_count=64,
             )
             region_state["context_seq_len"] = x_meta["seq_len"]
+        region_state["token_shape"] = x_meta["token_shape"]
 
     if phase == "phase1":
         for region_state, region_condition in zip(region_states, region_conditions):
@@ -1336,6 +1396,18 @@ def generate_image(
 
             if save_intermediates and intermediate_dir is not None:
                 step_number = i + 1
+                if use_layerbind and t1_step > 0 and step_number == t1_step and region_states is not None:
+                    save_debug_image(
+                        vae,
+                        latents,
+                        os.path.join(intermediate_dir, f"{output_name or 'layerbind'}_t1_step_{step_number:02d}.png"),
+                    )
+                    save_layerbind_phase1_debug_maps(
+                        region_states,
+                        (width, height),
+                        intermediate_dir,
+                        output_name,
+                    )
                 for save_step, save_percent in debug_save_points:
                     if step_number == save_step:
                         save_debug_image(

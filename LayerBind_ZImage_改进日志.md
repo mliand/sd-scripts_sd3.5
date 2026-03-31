@@ -29,6 +29,24 @@
 ### 2026-03-31 / `pending`
 
 - 背景问题：
+  - 当前多轮 `Phase2` 改动都只能轻微改善融合自然度，但无法显著减少 region 内灰色/彩色色块。
+  - 需要先验证这些色块是否在 `t1` 初始化阶段就已经被写入全局 latent，而不是继续盲改 `Phase2`。
+- 改动点：
+  - 新增 `t1` 诊断输出：
+    - 显式保存 `t1` 步的中间图
+    - 保存每个 region 在 `t1` 时使用的 `binary mask`
+    - 若存在 soft alpha，也一并保存 `alpha mask`
+  - 该改动只增强 debug 观测能力，不改变生成算法行为。
+- 预期收益：
+  - 直接判断色块源头是在 `Phase1/t1 blend` 还是后续 `Phase2`。
+- 已知风险：
+  - 无算法风险，仅增加 debug 输出文件。
+- 验证方式/结果：
+  - 本地执行静态校验。
+
+### 2026-03-31 / `pending`
+
+- 背景问题：
   - `Phase2 residual suppression` 实测对 region 内灰色/彩色色块是 0 收益。
   - 这说明问题不在 residual 大小后处理，而在更前面的 attention 路径本身：
     - 当前 `Phase2` 让整个 bbox 都作为 query 参与 local attention
