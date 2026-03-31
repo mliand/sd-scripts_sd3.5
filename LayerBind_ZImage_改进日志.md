@@ -29,6 +29,24 @@
 ### 2026-03-31 / `pending`
 
 - 背景问题：
+  - 当前示例 prompt 仍偏短，区域提示主要是名词级约束，不利于稳定统一风格，也不利于判断算法问题和 prompt 问题的边界。
+- 改动点：
+  - 更新 [examples/layerbind_layout_example.json](/home/coco/workspace/sd-scripts_sd3.5/examples/layerbind_layout_example.json)：
+    - `background_prompt` 改为更明确的白底儿童绘本插画风格
+    - `scene_prompt` 增加主体、服装、构图、材质、色彩与光照描述
+    - `region_prompt` 改为更具体的主体特征描述，但不带背景语义
+    - `negative_prompt` 扩充为包含 `duplicate subjects / mixed objects / extra limbs / messy composition`
+- 预期收益：
+  - 提升示例配置的一致风格和主体辨识度。
+  - 更容易区分“算法串区”与“prompt 太弱”两类问题。
+- 已知风险：
+  - 更长的 region prompt 会提升语义约束，也可能略微增加局部风格独立性。
+- 验证方式/结果：
+  - 配置改动，无需额外代码校验。
+
+### 2026-03-31 / `pending`
+
+- 背景问题：
   - 当前三块 region 与主背景的割裂感依然明显，尤其底层 non-occluding region 会把自己的局部背景整块带回全局。
   - 这和论文里“branch/global 共享背景结构”的假设在 `Z-Image self-attn` 上不完全成立有关。
 - 改动点：

@@ -1,7 +1,7 @@
 {
-  "background_prompt": "A clean white background, illustration style",
-  "scene_prompt": "An illustration of a girl standing in the center, a cat on the right, and an apple tree on the left, clean white background",
-  "negative_prompt": "bad quality,twisty,blurry,ugly,unclear,dirty,bad structure",
+  "background_prompt": "a clean white illustration background, minimal soft ground shadow, children's book editorial style, soft watercolor pencil texture, pastel color palette",
+  "scene_prompt": "a clean children's book illustration on a white background, a young girl standing in the center, full body, wearing a red dress and white socks, a small orange cat sitting on the right, and a lush apple tree with red apples on the left, soft watercolor pencil texture, pastel colors, gentle lighting, cohesive illustration style",
+  "negative_prompt": "bad quality, blurry, ugly, unclear, dirty, bad structure, duplicate subjects, mixed objects, extra limbs, extra animals, extra trees, deformed, messy composition",
   "config": {
     "eta1": 0.18,
     "eta2": 0.7,
@@ -11,17 +11,17 @@
   },
   "regions": [
     {
-      "region_prompt": "only an apple tree",
+      "region_prompt": "a lush apple tree with a brown trunk, rounded green leaves, and many small red apples, children's book illustration, soft watercolor pencil texture, pastel colors",
       "bbox": [60, 180, 380, 940],
       "layer_index": 1
     },
     {
-      "region_prompt": "only a girl",
+      "region_prompt": "a young girl, full body, facing forward, wearing a red dress and white socks, children's book illustration, soft watercolor pencil texture, pastel colors",
       "bbox": [360, 180, 700, 940],
       "layer_index": 2
     },
     {
-      "region_prompt": "only a cat",
+      "region_prompt": "a small orange cat sitting, facing slightly left, children's book illustration, soft watercolor pencil texture, pastel colors",
       "bbox": [700, 420, 940, 860],
       "layer_index": 3
     }
