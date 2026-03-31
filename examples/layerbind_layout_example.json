@@ -1,7 +1,7 @@
 {
   "background_prompt": "an outdoor grassy field with soft green grass, a bright daytime sky, gentle sunlight, children's book editorial style, soft watercolor pencil texture, pastel color palette",
-  "scene_prompt": "a children's book illustration in an outdoor grassy field, a young girl standing in the center, full body, wearing a red dress and white socks, a small orange cat sitting on the right, and a lush apple tree with red apples on the left, bright daytime sky, soft watercolor pencil texture, pastel colors, gentle sunlight, cohesive illustration style",
-  "negative_prompt": "bad quality, blurry, ugly, unclear, dirty, bad structure, duplicate subjects, mixed objects, extra limbs, extra animals, extra trees, deformed, messy composition",
+  "scene_prompt": "a close shot children's book illustration in an outdoor grassy field, a young girl standing in the center, full body, wearing a red dress and white socks, and a small orange cat sitting on the right, bright daytime sky, soft watercolor pencil texture, pastel colors, gentle sunlight, cohesive illustration style",
+  "negative_prompt": "bad quality, blurry, ugly, unclear, dirty, bad structure, duplicate subjects, mixed objects, extra limbs, extra animals, deformed, messy composition",
   "config": {
     "eta1": 0.25,
     "eta2": 0.7,
@@ -11,19 +11,14 @@
   },
   "regions": [
     {
-      "region_prompt": "a lush apple tree with a brown trunk, rounded green leaves, and many small red apples, children's book illustration, soft watercolor pencil texture, pastel colors",
-      "bbox": [60, 180, 380, 940],
+      "region_prompt": "a young girl, close shot, full body, facing forward, wearing a red dress and white socks, children's book illustration, soft watercolor pencil texture, pastel colors",
+      "bbox": [240, 160, 680, 980],
       "layer_index": 1
     },
     {
-      "region_prompt": "a young girl, full body, facing forward, wearing a red dress and white socks, children's book illustration, soft watercolor pencil texture, pastel colors",
-      "bbox": [360, 180, 700, 940],
+      "region_prompt": "a small orange cat, close shot, sitting, facing slightly left, children's book illustration, soft watercolor pencil texture, pastel colors",
+      "bbox": [700, 360, 980, 860],
       "layer_index": 2
-    },
-    {
-      "region_prompt": "a small orange cat sitting, facing slightly left, children's book illustration, soft watercolor pencil texture, pastel colors",
-      "bbox": [700, 420, 940, 860],
-      "layer_index": 3
     }
   ]
 }
