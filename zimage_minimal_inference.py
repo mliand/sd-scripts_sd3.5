@@ -302,6 +302,28 @@ def prepare_layerbind_conditions(
     }
 
 
+def blend_layerbind_caption_condition(
+    base_condition: dict[str, Any],
+    target_condition: dict[str, Any],
+    mix_ratio: float,
+):
+    mix_ratio = float(mix_ratio)
+    if mix_ratio <= 0.0:
+        return base_condition
+
+    base_tokens = base_condition["tokens"]
+    target_tokens = target_condition["tokens"].to(device=base_tokens.device, dtype=base_tokens.dtype)
+    mixed_tokens = base_tokens.clone()
+    shared_len = min(base_tokens.shape[1], target_tokens.shape[1])
+    if shared_len > 0:
+        mixed_tokens[:, :shared_len] = mixed_tokens[:, :shared_len].lerp(target_tokens[:, :shared_len], mix_ratio)
+
+    return {
+        **base_condition,
+        "tokens": mixed_tokens,
+    }
+
+
 def prepare_region_runtime_states(layout, x_seq_len: int, device: torch.device):
     all_indices = torch.arange(x_seq_len, device=device, dtype=torch.long)
     all_region_mask = torch.zeros(x_seq_len, dtype=torch.bool, device=device)
@@ -791,7 +813,12 @@ def run_layerbind_forward(
     apply_phase1_blend: bool,
     layer_stats_accumulator: Optional[dict[str, Any]] = None,
 ):
-    active_condition = background_condition if phase == "phase1" else scene_condition
+    active_condition = background_condition
+    if phase == "phase2":
+        # Z-Image's fused self-attention lets scene text leak across the whole canvas
+        # more aggressively than the joint-attention models used in the paper.
+        # Keep the global path background-dominant and only mix in a light scene prior.
+        active_condition = blend_layerbind_caption_condition(background_condition, scene_condition, mix_ratio=0.25)
     cap_tokens = active_condition["tokens"]
     cap_mask = active_condition["mask"]
     cap_freqs = active_condition["freqs"]

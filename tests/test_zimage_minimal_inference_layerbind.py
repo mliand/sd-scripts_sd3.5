@@ -146,6 +146,27 @@ def test_create_image_freqs_for_caption_length_matches_requested_offset():
     assert freqs[0, 0, 0].item() == 6.0
 
 
+def test_blend_layerbind_caption_condition_uses_base_shape_and_shared_prefix():
+    base_condition = {
+        "tokens": torch.tensor([[[1.0], [2.0]]]),
+        "mask": torch.tensor([[True, True]]),
+        "freqs": torch.tensor([[[0.0], [1.0]]]),
+    }
+    target_condition = {
+        "tokens": torch.tensor([[[5.0], [9.0], [13.0]]]),
+        "mask": torch.tensor([[True, True, True]]),
+        "freqs": torch.tensor([[[2.0], [3.0], [4.0]]]),
+    }
+
+    blended = zimage_minimal_inference.blend_layerbind_caption_condition(base_condition, target_condition, 0.25)
+
+    assert blended["tokens"].shape == (1, 2, 1)
+    assert abs(blended["tokens"][0, 0, 0].item() - 2.0) < 1e-6
+    assert abs(blended["tokens"][0, 1, 0].item() - 3.75) < 1e-6
+    assert blended["mask"] is base_condition["mask"]
+    assert blended["freqs"] is base_condition["freqs"]
+
+
 def test_phase1_branch_state_evolves_independently_from_current_global_patches():
     transformer = create_tiny_zimage_model()
     device = torch.device("cpu")

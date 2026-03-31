@@ -29,6 +29,34 @@
 ### 2026-03-31 / `pending`
 
 - 背景问题：
+  - 最新一轮对 `t1` 底层 soft alpha 写回和更强 `Phase2` 底层注入的尝试，用户实测“收益 0”。
+  - 结合当前现象，更像是 `Phase2` 全局主路径里的 `scene_prompt` 在 Z-Image 的融合式 self-attention 下过强，导致整图先生成全局主体，再由局部 region 做后补，最终表现为：
+    - 女孩只占 region 一小块
+    - 猫容易偏出 region
+    - 跨 region / 全局串语义持续存在
+- 改动点：
+  - 撤销未验证通过的两处补丁：
+    - 非遮挡层 `t1` soft alpha 写回
+    - 非遮挡层 `Phase2 injection scale = 0.75`
+  - `Phase2` 的全局主路径不再直接使用纯 `scene_condition`。
+  - 改为 `background_condition` 主导，仅对共享前缀 token 注入轻量 `scene_condition` 混合：
+    - `mixed_tokens[:shared_len] = lerp(background, scene, 0.25)`
+  - 保持 `mask/freqs/seq_len` 仍来自 `background_condition`，避免再次出现 caption 长度不一致带来的不稳定。
+  - 新增回归测试：`test_blend_layerbind_caption_condition_uses_base_shape_and_shared_prefix`。
+- 预期收益：
+  - 降低全局 scene 对整图主体布局的抢占。
+  - 让 region branch 在各自区域内更容易成为主导，而不是只覆盖局部残片。
+  - 继续保留背景连续性和整体风格一致性。
+- 已知风险：
+  - 若 `scene` 混合比例仍偏高，跨区污染会继续存在；若偏低，整图构图一致性可能下降。
+  - 这属于 Z-Image 自适配策略，不是论文原始 joint-attention 路径的直接照搬。
+- 验证方式/结果：
+  - 本地会执行静态校验。
+  - `pytest` 仍受当前环境是否具备 `torch` 限制。
+
+### 2026-03-31 / `pending`
+
+- 背景问题：
   - 当前双主体示例里，女孩只占 region 上方很小一部分，猫也容易偏出 region。
   - 主要原因不是新算法问题，而是示例 prompt 本身存在构图冲突：
     - `close shot` 与 `full body` 同时出现
