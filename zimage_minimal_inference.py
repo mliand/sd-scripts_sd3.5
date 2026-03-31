@@ -728,6 +728,7 @@ def compose_phase2_region_tokens(
         update = current + (float(beta) * mask) * delta
     else:
         update = current.lerp(local_tokens, float(beta))
+    update = update.to(dtype=current.dtype)
     composed = x_tokens.clone()
     composed.index_copy_(1, indices, update)
     return composed
@@ -753,10 +754,10 @@ def suppress_phase2_local_residual(
     if valid_norms.numel() > 0:
         clip_threshold = torch.quantile(valid_norms.to(dtype=torch.float32), 0.75).to(dtype=local_tokens.dtype)
         clip_threshold = clip_threshold * LAYERBIND_PHASE2_RESIDUAL_CLIP_MULTIPLIER
-        scale = torch.clamp(clip_threshold / residual_norm.clamp(min=1e-6), max=1.0)
+        scale = torch.clamp(clip_threshold / residual_norm.clamp(min=1e-6), max=1.0).to(dtype=local_tokens.dtype)
         gated_residual = gated_residual * scale
 
-    return region_tokens + gated_residual
+    return (region_tokens + gated_residual).to(dtype=local_tokens.dtype)
 
 
 def save_debug_image(vae, latents: torch.Tensor, file_path: str):

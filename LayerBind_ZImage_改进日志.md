@@ -29,6 +29,23 @@
 ### 2026-03-31 / `pending`
 
 - 背景问题：
+  - 在新增 `Phase2 residual suppression` 后，`bf16` 推理出现 dtype 写回错误：
+    - `index_copy_(): self and source expected to have the same dtype, but got (self) BFloat16 and (source) Float`
+- 改动点：
+  - 修正 `Phase2` residual clipping 路径中的 dtype 漂移：
+    - clipping scale 显式转回 `local_tokens.dtype`
+    - `compose_phase2_region_tokens` 在 `index_copy_` 前显式将 `update` cast 回 `current.dtype`
+  - 该修复不改变算法方向，仅保证 `bf16/fp16` 推理兼容。
+- 预期收益：
+  - 恢复 `Phase2 residual suppression` 版本在低精度推理下的正常运行。
+- 已知风险：
+  - 无额外算法风险，属于实现修复。
+- 验证方式/结果：
+  - 本地 `py_compile` 通过。
+
+### 2026-03-31 / `pending`
+
+- 背景问题：
   - 在 `Phase2 delta alpha merge` 后，region 内色块与背景/主体的融合更自然，但灰色/彩色色块数量没有明显减少。
   - 这说明问题已不主要在 compositing，而更在 `Phase2 local token` 本身仍带有较强脏残差。
 - 改动点：
