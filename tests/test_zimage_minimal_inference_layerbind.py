@@ -351,6 +351,38 @@ def test_phase1_blend_uses_direct_for_non_overlapping_layers(monkeypatch):
     assert abs(region_states[1]["region_mask"][0, 0, 0].item() - 1.0) < 1e-6
 
 
+def test_phase1_blend_preserves_global_background_for_bottom_layers_in_alpha_mode(monkeypatch):
+    x_tokens = torch.tensor([[[5.0]]])
+    region_states = [
+        {
+            "layer_index": 1,
+            "indices": torch.tensor([0], dtype=torch.long),
+            "branch_tokens": torch.tensor([[[9.0]]]),
+            "alpha_mask": None,
+        }
+    ]
+
+    monkeypatch.setattr(
+        zimage_minimal_inference.zimage_layerbind_utils,
+        "estimate_alpha_from_token_difference",
+        lambda *args, **kwargs: (torch.tensor([[[0.25]]]), torch.tensor([[[0.0]]])),
+    )
+
+    blended = zimage_minimal_inference.blend_region_tokens(
+        x_tokens,
+        region_states,
+        beta=0.7,
+        blend_mode="alpha",
+        token_shape=(1, 1, 1),
+        gamma=0.9,
+        poisson_lambda=0.5,
+    )
+
+    assert abs(blended[0, 0, 0].item() - 5.0) < 1e-6
+    assert region_states[0]["alpha_mask"] is None
+    assert abs(region_states[0]["region_mask"][0, 0, 0].item() - 0.0) < 1e-6
+
+
 def test_phase2_composition_uses_beta_times_binary_mask_once():
     x_tokens = torch.zeros(1, 2, 1)
     local_tokens = torch.tensor([[[10.0], [10.0]]])

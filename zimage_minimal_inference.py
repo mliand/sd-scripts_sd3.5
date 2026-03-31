@@ -663,6 +663,7 @@ def blend_region_tokens(
         if blend_mode == "direct" or not is_occluding:
             if blend_mode == "direct":
                 region_state["region_mask"] = torch.ones_like(branch_tokens[:, :, :1])
+                update = branch_tokens
             else:
                 _alpha_mask, binary_mask = zimage_layerbind_utils.estimate_alpha_from_token_difference(
                     branch_tokens,
@@ -674,7 +675,9 @@ def blend_region_tokens(
                     return_binary_mask=True,
                 )
                 region_state["region_mask"] = binary_mask
-            update = branch_tokens
+                # Preserve the shared global background for non-occluding layers and only
+                # write back the estimated foreground area from the branch.
+                update = binary_mask * branch_tokens + (1.0 - binary_mask) * current
             region_state["alpha_mask"] = None
         else:
             alpha_mask, binary_mask = zimage_layerbind_utils.estimate_alpha_from_token_difference(

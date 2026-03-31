@@ -29,6 +29,26 @@
 ### 2026-03-31 / `pending`
 
 - 背景问题：
+  - 当前三块 region 与主背景的割裂感依然明显，尤其底层 non-occluding region 会把自己的局部背景整块带回全局。
+  - 这和论文里“branch/global 共享背景结构”的假设在 `Z-Image self-attn` 上不完全成立有关。
+- 改动点：
+  - `t1` 时，对 `blend_mode=alpha` 且 `non-occluding` 的 region，不再整块 `direct overwrite`。
+  - 改为基于已有 `binary_mask` 的前景写回：
+    - `update = binary_mask * branch + (1 - binary_mask) * current`
+  - 保留 occluding 层的 `alpha_f` 软合成不变。
+  - 新增回归测试：`test_phase1_blend_preserves_global_background_for_bottom_layers_in_alpha_mode`。
+- 预期收益：
+  - 减轻底层 region 和主背景之间的接缝与割裂。
+  - 保留主体写回收益，同时让背景连续性更接近论文假设。
+- 已知风险：
+  - 若 `binary_mask` 估计过紧，底层主体边缘可能被削弱。
+- 验证方式/结果：
+  - 本地会执行静态校验。
+  - `pytest` 仍受当前环境缺少 `torch` 限制。
+
+### 2026-03-31 / `pending`
+
+- 背景问题：
   - 当前三块 region 独立性偏强，region 内局部背景和主背景有明显割裂感。
   - 这更像 `Phase1` 锚定过强、背景竞争过弱导致的过度解耦，而不是位置约束不足。
 - 改动点：
