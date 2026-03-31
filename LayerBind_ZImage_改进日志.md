@@ -29,6 +29,21 @@
 ### 2026-03-31 / `pending`
 
 - 背景问题：
+  - 在引入 region-local RoPE 后，`Phase2` 局部路径仍残留一次旧变量名引用，导致推理启动后报错：
+    - `NameError: name 'region_x_freqs' is not defined`
+- 改动点：
+  - 将 `Phase2` 局部更新里的全局 image context 频率输入，从旧残留变量 `region_x_freqs` 改为当前正确的全局图像频率 `x_freqs_cis`。
+  - 该修复不改变算法行为，仅修正 region-local RoPE 重构后的变量引用错误。
+- 预期收益：
+  - 恢复第二步 region-local position prior 版本的正常推理。
+- 已知风险：
+  - 无额外算法风险，属于实现修复。
+- 验证方式/结果：
+  - 本地 `py_compile` 通过。
+
+### 2026-03-31 / `pending`
+
+- 背景问题：
   - 在论文对齐修正后，主体占比和位置已明显改善，但 region 内部仍常出现“主体只覆盖上半部分，下半部分大片留空”。
   - 这说明当前主要矛盾已从“主体在哪个 region”转为“主体如何在 region 内部铺开”。
 - 改动点：

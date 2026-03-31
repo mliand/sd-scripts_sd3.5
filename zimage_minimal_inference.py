@@ -1003,7 +1003,7 @@ def run_layerbind_forward(
                     region_tokens,
                     region_freqs,
                     context_states=[region_state["text_tokens"], global_x_tokens],
-                    context_freqs_cis=[region_condition["freqs"], region_x_freqs],
+                    context_freqs_cis=[region_condition["freqs"], x_freqs_cis],
                     adaln_input=adaln_input,
                     include_query_in_kv=include_query_in_kv,
                     segment_logit_biases=local_segment_biases,
