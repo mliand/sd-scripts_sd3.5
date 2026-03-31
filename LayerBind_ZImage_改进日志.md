@@ -29,6 +29,19 @@
 ### 2026-03-31 / `pending`
 
 - 背景问题：
+  - 当前主体在 region 内占比偏小，说明 `Phase1` 实例初始化强度偏保守。
+- 改动点：
+  - 示例 layout 的 `eta1` 从 `0.18` 调回 `0.25`，恢复更长的 `Phase1` 初始化区间。
+- 预期收益：
+  - 提升主体在 region 内的占比和成形强度。
+- 已知风险：
+  - `eta1` 回升后，region/background 过度解耦风险也会同步上升，需要继续观察接缝问题。
+- 验证方式/结果：
+  - 配置改动，无需额外代码校验。
+
+### 2026-03-31 / `pending`
+
+- 背景问题：
   - 当前示例 prompt 仍偏短，区域提示主要是名词级约束，不利于稳定统一风格，也不利于判断算法问题和 prompt 问题的边界。
 - 改动点：
   - 更新 [examples/layerbind_layout_example.json](/home/coco/workspace/sd-scripts_sd3.5/examples/layerbind_layout_example.json)：

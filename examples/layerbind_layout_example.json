@@ -3,7 +3,7 @@
   "scene_prompt": "a children's book illustration in an outdoor grassy field, a young girl standing in the center, full body, wearing a red dress and white socks, a small orange cat sitting on the right, and a lush apple tree with red apples on the left, bright daytime sky, soft watercolor pencil texture, pastel colors, gentle sunlight, cohesive illustration style",
   "negative_prompt": "bad quality, blurry, ugly, unclear, dirty, bad structure, duplicate subjects, mixed objects, extra limbs, extra animals, extra trees, deformed, messy composition",
   "config": {
-    "eta1": 0.18,
+    "eta1": 0.25,
     "eta2": 0.7,
     "beta": 0.55,
     "phase2_delta_scale": 0.45,
