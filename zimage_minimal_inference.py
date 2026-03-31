@@ -789,9 +789,17 @@ def run_layerbind_forward(
     layer_stats_accumulator: Optional[dict[str, Any]] = None,
 ):
     active_condition = background_condition if phase == "phase1" else scene_condition
-    cap_tokens = active_condition["tokens"]
-    cap_mask = active_condition["mask"]
-    cap_freqs = active_condition["freqs"]
+    if phase == "phase1":
+        # Lightly inject scene semantics into the background-driven global path.
+        # Keep the weight conservative to avoid destabilizing the currently stable baseline.
+        phase1_scene_mix = 0.15
+        cap_tokens = background_condition["tokens"].lerp(scene_condition["tokens"], phase1_scene_mix)
+        cap_mask = background_condition["mask"]
+        cap_freqs = background_condition["freqs"]
+    else:
+        cap_tokens = active_condition["tokens"]
+        cap_mask = active_condition["mask"]
+        cap_freqs = active_condition["freqs"]
     cap_seq_len = cap_tokens.shape[1]
 
     adaln_input = transformer.prepare_adaln_input(timestep)

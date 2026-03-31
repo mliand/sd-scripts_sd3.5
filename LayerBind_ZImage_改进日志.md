@@ -29,6 +29,25 @@
 ### 2026-03-31 / `pending`
 
 - 背景问题：
+  - 在当前稳定基线下，纯 `background_condition` 主导的 `Phase1` 全局路径有利于背景连续，但主体语义仍可能偏弱。
+  - 直接切到纯 `scene_condition` 之前已经验证会打坏稳定性，因此只能做轻量注入。
+- 改动点：
+  - `Phase1` 主路径改为保守的 `background + scene` 混合：
+    - `cap_tokens = lerp(background_tokens, scene_tokens, 0.15)`
+  - 只在 `Phase1` 生效，`Phase2` 保持原样。
+  - `cap_mask/cap_freqs` 仍沿用 `background_condition`，不改序列结构。
+- 预期收益：
+  - 在不打坏背景稳定性的前提下，给全局主路径补一点 scene/object 语义。
+  - 进一步减轻“位置对但主体仍偏弱”的问题。
+- 已知风险：
+  - 即使权重很小，也可能重新放大全局串区；若有副作用，需要立即回退。
+- 验证方式/结果：
+  - 本地会执行静态校验。
+  - `pytest` 仍受当前环境缺少 `torch` 限制。
+
+### 2026-03-31 / `pending`
+
+- 背景问题：
   - 当前位置已经基本对齐，主要残留问题是跨 region 概念污染，以及 region/background 轻微割裂。
   - 结合论文附录 C.2/C.3 的描述，这更像是后期语义串扰和前期过度解耦叠加。
 - 改动点：
