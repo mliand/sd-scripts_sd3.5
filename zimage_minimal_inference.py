@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 
 init_ipex()
 
+LAYERBIND_PHASE2_TEXT_UPDATE_SCALE = 0.35
+
 
 def parse_layer_spec(text: str):
     if text in ("", "all"):
@@ -302,28 +304,6 @@ def prepare_layerbind_conditions(
     }
 
 
-def blend_layerbind_caption_condition(
-    base_condition: dict[str, Any],
-    target_condition: dict[str, Any],
-    mix_ratio: float,
-):
-    mix_ratio = float(mix_ratio)
-    if mix_ratio <= 0.0:
-        return base_condition
-
-    base_tokens = base_condition["tokens"]
-    target_tokens = target_condition["tokens"].to(device=base_tokens.device, dtype=base_tokens.dtype)
-    mixed_tokens = base_tokens.clone()
-    shared_len = min(base_tokens.shape[1], target_tokens.shape[1])
-    if shared_len > 0:
-        mixed_tokens[:, :shared_len] = mixed_tokens[:, :shared_len].lerp(target_tokens[:, :shared_len], mix_ratio)
-
-    return {
-        **base_condition,
-        "tokens": mixed_tokens,
-    }
-
-
 def prepare_region_runtime_states(layout, x_seq_len: int, device: torch.device):
     all_indices = torch.arange(x_seq_len, device=device, dtype=torch.long)
     all_region_mask = torch.zeros(x_seq_len, dtype=torch.bool, device=device)
@@ -385,57 +365,14 @@ def build_layerbind_local_context_indices(
     if region_indices.numel() == 0:
         return torch.zeros((0,), device=device, dtype=torch.long)
 
-    _, token_height, token_width = token_shape
-    if token_height * token_width != seq_len:
-        all_indices = torch.arange(seq_len, device=device, dtype=torch.long)
-        region_mask = torch.zeros(seq_len, device=device, dtype=torch.bool)
-        region_mask[region_indices] = True
-        return all_indices[~region_mask]
-
-    region_y = torch.div(region_indices, token_width, rounding_mode="floor")
-    region_x = region_indices % token_width
-    x1 = max(0, int(region_x.min().item()) - int(radius))
-    y1 = max(0, int(region_y.min().item()) - int(radius))
-    x2 = min(token_width, int(region_x.max().item()) + int(radius) + 1)
-    y2 = min(token_height, int(region_y.max().item()) + int(radius) + 1)
-
-    y_coords = torch.arange(y1, y2, device=device, dtype=torch.long)
-    x_coords = torch.arange(x1, x2, device=device, dtype=torch.long)
-    yy, xx = torch.meshgrid(y_coords, x_coords, indexing="ij")
-    local_rect_indices = (yy * token_width + xx).reshape(-1)
-
     all_indices = torch.arange(seq_len, device=device, dtype=torch.long)
     region_mask = torch.zeros(seq_len, device=device, dtype=torch.bool)
     region_mask[region_indices] = True
-    forbidden_mask = torch.zeros(seq_len, device=device, dtype=torch.bool)
-    if forbidden_indices is not None and forbidden_indices.numel() > 0:
-        forbidden_mask[forbidden_indices] = True
-    local_mask = torch.zeros(seq_len, device=device, dtype=torch.bool)
-    local_mask[local_rect_indices] = True
-
-    local_background = all_indices[local_mask & ~region_mask & ~forbidden_mask]
-    global_candidates = all_indices[~local_mask & ~region_mask & ~forbidden_mask]
-
-    if global_anchor_count > 0 and global_candidates.numel() > 0:
-        if global_candidates.numel() <= global_anchor_count:
-            anchors = global_candidates
-        else:
-            sample_positions = torch.linspace(
-                0,
-                global_candidates.numel() - 1,
-                steps=global_anchor_count,
-                device=device,
-            ).round()
-            anchors = global_candidates.index_select(0, sample_positions.to(dtype=torch.long))
-    else:
-        anchors = torch.zeros((0,), device=device, dtype=torch.long)
-
-    context_indices = torch.cat([local_background, anchors], dim=0)
-    if context_indices.numel() == 0:
-        context_indices = all_indices[~region_mask & ~forbidden_mask]
-    if context_indices.numel() == 0:
-        context_indices = all_indices[~region_mask]
-    return torch.unique(context_indices, sorted=True)
+    # Paper-aligned context: use the full global image outside the current region.
+    # Do not hard-exclude other regions here; let later compositing, not context
+    # pruning, handle inter-layer visibility.
+    del token_shape, forbidden_indices, radius, global_anchor_count
+    return all_indices[~region_mask]
 
 
 def build_layerbind_segment_logit_biases(
@@ -813,12 +750,7 @@ def run_layerbind_forward(
     apply_phase1_blend: bool,
     layer_stats_accumulator: Optional[dict[str, Any]] = None,
 ):
-    active_condition = background_condition
-    if phase == "phase2":
-        # Z-Image's fused self-attention lets scene text leak across the whole canvas
-        # more aggressively than the joint-attention models used in the paper.
-        # Keep the global path background-dominant and only mix in a light scene prior.
-        active_condition = blend_layerbind_caption_condition(background_condition, scene_condition, mix_ratio=0.25)
+    active_condition = background_condition if phase == "phase1" else scene_condition
     cap_tokens = active_condition["tokens"]
     cap_mask = active_condition["mask"]
     cap_freqs = active_condition["freqs"]
@@ -1019,29 +951,23 @@ def run_layerbind_forward(
                 region_tokens, region_freqs = transformer.select_token_subset(
                     global_x_tokens, region_state["indices"], region_x_freqs
                 )
-                local_context_indices = region_state.get("context_indices", region_state["background_indices"])
-                local_global_tokens, local_global_freqs = transformer.select_token_subset(
-                    global_x_tokens,
-                    local_context_indices,
-                    region_x_freqs,
-                )
                 if region_state["text_tokens"] is None:
                     region_state["text_tokens"] = region_condition["tokens"].clone()
-                include_query_in_kv = layer_idx in hard_binding_layers
+                include_query_in_kv = False
                 local_segment_biases = build_layerbind_segment_logit_biases(
                     include_query_in_kv=include_query_in_kv,
                     query_length=region_tokens.shape[1],
                     context_lengths=[
                         region_state["text_tokens"].shape[1],
-                        local_global_tokens.shape[1],
+                        global_x_tokens.shape[1],
                     ],
-                    context_roles=["text_anchor", "local_global_sparse"],
+                    context_roles=["text_anchor", "local_global"],
                 )
                 local_tokens = layer.contextual_forward(
                     region_tokens,
                     region_freqs,
-                    context_states=[region_state["text_tokens"], local_global_tokens],
-                    context_freqs_cis=[region_condition["freqs"], local_global_freqs],
+                    context_states=[region_state["text_tokens"], global_x_tokens],
+                    context_freqs_cis=[region_condition["freqs"], region_x_freqs],
                     adaln_input=adaln_input,
                     include_query_in_kv=include_query_in_kv,
                     segment_logit_biases=local_segment_biases,
@@ -1049,6 +975,24 @@ def run_layerbind_forward(
                 region_injection_scale = 1.0 if region_state.get("is_occluding", False) else 0.60
                 local_tokens = region_tokens.lerp(local_tokens, float(phase2_delta_scale) * region_injection_scale)
                 region_state["branch_tokens"] = local_tokens
+                text_segment_biases = build_layerbind_segment_logit_biases(
+                    include_query_in_kv=False,
+                    query_length=region_state["text_tokens"].shape[1],
+                    context_lengths=[local_tokens.shape[1], cap_tokens_current.shape[1]],
+                    context_roles=["branch", "scene_text"],
+                )
+                updated_text_tokens = layer.contextual_forward(
+                    region_state["text_tokens"],
+                    region_condition["freqs"],
+                    context_states=[local_tokens, cap_tokens_current],
+                    context_freqs_cis=[region_freqs, cap_freqs_current],
+                    adaln_input=adaln_input,
+                    include_query_in_kv=False,
+                    segment_logit_biases=text_segment_biases,
+                )
+                region_state["text_tokens"] = region_state["text_tokens"].lerp(
+                    updated_text_tokens, LAYERBIND_PHASE2_TEXT_UPDATE_SCALE
+                )
                 composed_x_tokens = compose_phase2_region_tokens(
                     composed_x_tokens,
                     local_tokens,

@@ -146,25 +146,38 @@ def test_create_image_freqs_for_caption_length_matches_requested_offset():
     assert freqs[0, 0, 0].item() == 6.0
 
 
-def test_blend_layerbind_caption_condition_uses_base_shape_and_shared_prefix():
-    base_condition = {
-        "tokens": torch.tensor([[[1.0], [2.0]]]),
-        "mask": torch.tensor([[True, True]]),
-        "freqs": torch.tensor([[[0.0], [1.0]]]),
-    }
-    target_condition = {
-        "tokens": torch.tensor([[[5.0], [9.0], [13.0]]]),
-        "mask": torch.tensor([[True, True, True]]),
-        "freqs": torch.tensor([[[2.0], [3.0], [4.0]]]),
-    }
+def test_build_layerbind_local_context_indices_returns_full_global_context():
+    indices = zimage_minimal_inference.build_layerbind_local_context_indices(
+        region_indices=torch.tensor([1, 3], dtype=torch.long),
+        token_shape=(1, 2, 3),
+        seq_len=6,
+        device=torch.device("cpu"),
+        forbidden_indices=torch.tensor([0, 5], dtype=torch.long),
+        radius=1,
+        global_anchor_count=2,
+    )
 
-    blended = zimage_minimal_inference.blend_layerbind_caption_condition(base_condition, target_condition, 0.25)
+    assert torch.equal(indices, torch.tensor([0, 2, 4, 5], dtype=torch.long))
 
-    assert blended["tokens"].shape == (1, 2, 1)
-    assert abs(blended["tokens"][0, 0, 0].item() - 2.0) < 1e-6
-    assert abs(blended["tokens"][0, 1, 0].item() - 3.75) < 1e-6
-    assert blended["mask"] is base_condition["mask"]
-    assert blended["freqs"] is base_condition["freqs"]
+
+def test_prepare_layerbind_layout_keeps_overlap_tokens_for_all_layers(tmp_path):
+    layout_path = tmp_path / "layout_overlap.json"
+    layout_path.write_text(
+        json.dumps(
+            {
+                "regions": [
+                    {"region_prompt": "back", "bbox": [0, 0, 32, 16], "layer_index": 1},
+                    {"region_prompt": "front", "bbox": [16, 0, 48, 16], "layer_index": 2},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    layout = zimage_minimal_inference.prepare_layerbind_layout({"layerbind_layout": str(layout_path)}, width=48, height=16)
+
+    assert layout.regions[0].token_indices == [0, 1]
+    assert layout.regions[1].token_indices == [1, 2]
 
 
 def test_phase1_branch_state_evolves_independently_from_current_global_patches():
@@ -557,4 +570,5 @@ def test_phase2_resets_region_text_tokens_from_prompt_each_timestep(monkeypatch)
         apply_phase1_blend=False,
     )
 
-    assert torch.allclose(region_states[0]["text_tokens"], region_tokens)
+    expected = region_tokens + zimage_minimal_inference.LAYERBIND_PHASE2_TEXT_UPDATE_SCALE * len(transformer.layers)
+    assert torch.allclose(region_states[0]["text_tokens"], expected)

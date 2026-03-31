@@ -374,31 +374,19 @@ def populate_region_token_indices(
     vae_scale_factor: int = zimage_config.ZIMAGE_VAE_SCALE_FACTOR,
     patch_size: int = zimage_config.DEFAULT_TRANSFORMER_PATCH_SIZE[0],
 ) -> LayerBindLayout:
-    prelim_regions = []
+    populated_regions = []
     for region in sorted(layout.regions, key=lambda item: item.layer_index):
-        token_indices = set(
-            bbox_to_token_indices(
-                region.bbox,
-                image_width=image_width,
-                image_height=image_height,
-                vae_scale_factor=vae_scale_factor,
-                patch_size=patch_size,
+        token_indices = sorted(
+            set(
+                bbox_to_token_indices(
+                    region.bbox,
+                    image_width=image_width,
+                    image_height=image_height,
+                    vae_scale_factor=vae_scale_factor,
+                    patch_size=patch_size,
+                )
             )
         )
-        prelim_regions.append((region, token_indices))
-
-    # Enforce unique token ownership by occlusion order:
-    # later (higher layer_index) regions keep overlaps; lower layers drop them.
-    occupied_by_higher: set[int] = set()
-    unique_tokens_by_layer: dict[int, set[int]] = {}
-    for region, token_set in reversed(prelim_regions):
-        unique_set = token_set - occupied_by_higher
-        unique_tokens_by_layer[region.layer_index] = unique_set
-        occupied_by_higher |= token_set
-
-    populated_regions = []
-    for region, _token_set in prelim_regions:
-        token_indices = sorted(unique_tokens_by_layer.get(region.layer_index, set()))
         populated_regions.append(
             RegionLayer(
                 region_prompt=region.region_prompt,

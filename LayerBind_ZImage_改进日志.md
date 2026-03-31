@@ -29,30 +29,46 @@
 ### 2026-03-31 / `pending`
 
 - 背景问题：
-  - 最新一轮对 `t1` 底层 soft alpha 写回和更强 `Phase2` 底层注入的尝试，用户实测“收益 0”。
-  - 结合当前现象，更像是 `Phase2` 全局主路径里的 `scene_prompt` 在 Z-Image 的融合式 self-attention 下过强，导致整图先生成全局主体，再由局部 region 做后补，最终表现为：
-    - 女孩只占 region 一小块
-    - 猫容易偏出 region
-    - 跨 region / 全局串语义持续存在
+  - 当前 `Z-Image` 版 LayerBind 仍存在主体只占 region 局部、region/background 割裂和跨 region 污染。
+  - 对照论文后确认，当前实现仍有几处关键路径没有完全对齐原始方法：
+    - `Phase1/Phase2` 的图像上下文被裁成局部窗口 + anchors，而不是论文里的完整 `e_I` 或 `e_I[~idx(i)]`
+    - `Phase2` 缺少论文 Eq.11 的区域 text 更新回路
+    - bbox overlap token 在进入推理前被提前做了唯一归属，弱化了后续按层融合
+    - foreign-region token 被硬排除，容易把 region 做成“孤岛”
 - 改动点：
-  - 撤销未验证通过的两处补丁：
-    - 非遮挡层 `t1` soft alpha 写回
-    - 非遮挡层 `Phase2 injection scale = 0.75`
-  - `Phase2` 的全局主路径不再直接使用纯 `scene_condition`。
-  - 改为 `background_condition` 主导，仅对共享前缀 token 注入轻量 `scene_condition` 混合：
-    - `mixed_tokens[:shared_len] = lerp(background, scene, 0.25)`
-  - 保持 `mask/freqs/seq_len` 仍来自 `background_condition`，避免再次出现 caption 长度不一致带来的不稳定。
-  - 新增回归测试：`test_blend_layerbind_caption_condition_uses_base_shape_and_shared_prefix`。
+  - `Phase1/Phase2` 的 region image context 改回论文风格：
+    - context 使用当前全局图像中“除自身 region 外”的完整 token 集合
+    - 不再对 foreign-region 做硬排除
+  - `Phase2` 的局部更新改为读取完整 `e_I`，不再使用 sparse local-global context。
+  - `Phase2` 恢复受控版区域 text 更新：
+    - 结构对齐 Eq.11：`e_Treg <- Aupdate(e_Treg, [e_Ireg, e_Tscene])`
+    - 采用阻尼更新，避免 text 在 Z-Image 上过快漂移
+  - region token 索引不再在预处理阶段做 overlap 唯一归属，重叠 token 交由后续 layer-wise blending 处理。
+  - 新增回归测试：
+    - full-global context 行为
+    - overlap token 保留
+    - `Phase2` text update 行为
 - 预期收益：
-  - 降低全局 scene 对整图主体布局的抢占。
-  - 让 region branch 在各自区域内更容易成为主导，而不是只覆盖局部残片。
-  - 继续保留背景连续性和整体风格一致性。
+  - 让 `Phase1/2` 的信息流更接近论文。
+  - 降低 region 被切成孤岛带来的背景断裂。
+  - 提升主体在 region 内的完整成形，而不是只在局部角落出现。
 - 已知风险：
-  - 若 `scene` 混合比例仍偏高，跨区污染会继续存在；若偏低，整图构图一致性可能下降。
-  - 这属于 Z-Image 自适配策略，不是论文原始 joint-attention 路径的直接照搬。
+  - 计算量会高于当前 sparse-context 实现。
+  - 即使完全论文对齐，`Z-Image` 的 unified self-attention 仍可能与 `SD3/FLUX` 的 joint attention 存在机制差异。
 - 验证方式/结果：
-  - 本地会执行静态校验。
-  - `pytest` 仍受当前环境是否具备 `torch` 限制。
+  - 本地执行静态校验。
+  - 单元测试仍受当前环境是否具备 `torch` 限制。
+
+### 2026-03-31 / `reverted`
+
+- 背景问题：
+  - 曾尝试让 `Phase2` 全局主路径改为 `background_condition` 主导，并轻量混入 `scene_condition`，希望压低全局 scene 抢主体的问题。
+- 改动点：
+  - 该方向已在用户实测后回退，不属于当前有效实现。
+  - 现象是“收益 0”，并且猫主体明显变弱甚至消失。
+- 结论：
+  - 对当前 Z-Image base，直接削弱 `Phase2` 全局 scene 主路径会先打掉 region 主体成形，不是正确方向。
+  - 后续应继续优先从 `Phase1 branch` 成形、region 几何约束和局部上下文结构入手，而不是先弱化 `Phase2` 全局 scene。
 
 ### 2026-03-31 / `pending`
 
