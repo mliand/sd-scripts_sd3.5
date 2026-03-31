@@ -35,7 +35,7 @@
 - 改动点：
   - 在 `t1 blend` 中引入 `core-first blend`：
     - 先基于 bbox 几何中心生成稳定的 region core seed
-    - 再只保留与该核心连通的 diff-mask 连通域
+    - 再只保留与该核心重叠最强、且 alpha 质量最高的主连通域
     - 最终让 diff 负责边界微调，而不是决定整张前景 mask
   - 该策略仅应用于 `Phase1/t1 blend`，不改变 `Phase2` 的 alpha 估计逻辑。
   - 新增测试：验证 `core-first` 会去掉不与 bbox 核心连通的碎片 mask。

@@ -1,5 +1,6 @@
 import json
 import math
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -301,6 +302,37 @@ def _morphological_reconstruct(seed: torch.Tensor, mask: torch.Tensor, max_iters
     return current
 
 
+def _connected_components_2d(mask_2d: torch.Tensor) -> list[torch.Tensor]:
+    mask_cpu = (mask_2d > 0).to(device="cpu", dtype=torch.bool)
+    height, width = mask_cpu.shape
+    visited = torch.zeros((height, width), dtype=torch.bool)
+    components: list[torch.Tensor] = []
+    neighbors = ((1, 0), (-1, 0), (0, 1), (0, -1))
+
+    for y in range(height):
+        for x in range(width):
+            if not mask_cpu[y, x].item() or visited[y, x].item():
+                continue
+            component = torch.zeros((height, width), dtype=torch.float32)
+            queue = deque([(y, x)])
+            visited[y, x] = True
+            component[y, x] = 1.0
+            while queue:
+                cy, cx = queue.popleft()
+                for dy, dx in neighbors:
+                    ny = cy + dy
+                    nx = cx + dx
+                    if ny < 0 or ny >= height or nx < 0 or nx >= width:
+                        continue
+                    if visited[ny, nx].item() or not mask_cpu[ny, nx].item():
+                        continue
+                    visited[ny, nx] = True
+                    component[ny, nx] = 1.0
+                    queue.append((ny, nx))
+            components.append(component.to(device=mask_2d.device))
+    return components
+
+
 def _build_region_core_mask(
     token_indices: Sequence[int] | torch.Tensor,
     token_shape: tuple[int, int, int],
@@ -345,20 +377,52 @@ def refine_alpha_mask_with_region_core(
     core_ratio: float = 0.5,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     core_mask = _build_region_core_mask(token_indices, token_shape, binary_mask.device, core_ratio=core_ratio)
-    seed = binary_mask * core_mask
-    if seed.amax().item() <= 0:
-        seed = binary_mask * _binary_dilate(core_mask, iterations=1)
-    if seed.amax().item() <= 0:
-        seed = binary_mask * _binary_dilate(core_mask, iterations=2)
-    if seed.amax().item() <= 0:
-        return alpha_map, binary_mask
+    refined_binary = torch.zeros_like(binary_mask)
+    refined_alpha = torch.zeros_like(alpha_map)
 
-    reconstructed = _morphological_reconstruct(seed, binary_mask)
-    if reconstructed.amax().item() <= 0:
-        return alpha_map, binary_mask
+    for batch_index in range(binary_mask.shape[0]):
+        batch_binary = binary_mask[batch_index, 0]
+        batch_alpha = alpha_map[batch_index, 0]
+        batch_core = core_mask[0, 0]
 
-    refined_binary = _morphology_refine(reconstructed)
-    refined_alpha = alpha_map * refined_binary
+        candidate_mask = batch_binary
+        if (candidate_mask * batch_core).amax().item() <= 0:
+            candidate_mask = batch_binary * _binary_dilate(core_mask, iterations=1)[0, 0]
+        if (candidate_mask * batch_core).amax().item() <= 0:
+            candidate_mask = batch_binary * _binary_dilate(core_mask, iterations=2)[0, 0]
+        if candidate_mask.amax().item() <= 0:
+            refined_binary[batch_index : batch_index + 1] = binary_mask[batch_index : batch_index + 1]
+            refined_alpha[batch_index : batch_index + 1] = alpha_map[batch_index : batch_index + 1] * binary_mask[
+                batch_index : batch_index + 1
+            ]
+            continue
+
+        components = _connected_components_2d(candidate_mask)
+        if not components:
+            refined_binary[batch_index : batch_index + 1] = binary_mask[batch_index : batch_index + 1]
+            refined_alpha[batch_index : batch_index + 1] = alpha_map[batch_index : batch_index + 1] * binary_mask[
+                batch_index : batch_index + 1
+            ]
+            continue
+
+        best_component = None
+        best_score = None
+        for component in components:
+            core_overlap = float((component * batch_core).sum().item())
+            alpha_mass = float((component * batch_alpha).sum().item())
+            area = float(component.sum().item())
+            center_distance_penalty = float(
+                ((component > 0).float() * (1.0 - batch_core)).sum().item() / max(area, 1.0)
+            )
+            score = (core_overlap * 1000.0) + (alpha_mass * 10.0) - center_distance_penalty
+            if best_score is None or score > best_score:
+                best_score = score
+                best_component = component
+
+        assert best_component is not None
+        best_component = _morphology_refine(best_component.unsqueeze(0).unsqueeze(0))[0, 0]
+        refined_binary[batch_index, 0] = best_component
+        refined_alpha[batch_index, 0] = batch_alpha * best_component
     return refined_alpha, refined_binary
 
 
