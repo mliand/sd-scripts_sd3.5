@@ -636,8 +636,6 @@ def blend_region_tokens(
                     poisson_lambda=poisson_lambda,
                     return_binary_mask=True,
                 )
-                if binary_mask.amax().item() <= 1e-6:
-                    binary_mask = torch.ones_like(branch_tokens[:, :, :1])
                 region_state["region_mask"] = binary_mask
             update = branch_tokens
             region_state["alpha_mask"] = None
@@ -651,8 +649,6 @@ def blend_region_tokens(
                 poisson_lambda=poisson_lambda,
                 return_binary_mask=True,
             )
-            if binary_mask.amax().item() <= 1e-6:
-                binary_mask = torch.ones_like(branch_tokens[:, :, :1])
             region_state["region_mask"] = binary_mask
             region_state["alpha_mask"] = alpha_mask
             update = alpha_mask * branch_tokens + (1.0 - alpha_mask) * current
@@ -974,7 +970,7 @@ def run_layerbind_forward(
                     include_query_in_kv=include_query_in_kv,
                     segment_logit_biases=local_segment_biases,
                 )
-                region_injection_scale = 1.0 if region_state.get("is_occluding", False) else 0.65
+                region_injection_scale = 1.0 if region_state.get("is_occluding", False) else 0.50
                 local_tokens = region_tokens.lerp(local_tokens, float(phase2_delta_scale) * region_injection_scale)
                 text_include_query = include_query_in_kv
                 text_segment_biases = build_layerbind_segment_logit_biases(

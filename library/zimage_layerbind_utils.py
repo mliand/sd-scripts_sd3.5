@@ -343,8 +343,13 @@ def estimate_alpha_from_token_difference(
     for batch_index in range(alpha_map.shape[0]):
         region_values = flat_alpha[batch_index][flat_region_mask]
         threshold = _otsu_threshold(region_values)
+        percentile_threshold = float(torch.quantile(region_values, 0.65).item()) if region_values.numel() > 1 else threshold
+        threshold = max(threshold, percentile_threshold)
         binary = ((alpha_map[batch_index : batch_index + 1] >= threshold).float() * region_mask).float()
         binary = _morphology_refine(binary)
+        tightened_binary = _binary_erode(binary, iterations=1)
+        if tightened_binary.amax().item() > 0:
+            binary = tightened_binary
         refined = alpha_map[batch_index : batch_index + 1] * binary
         if refined.amax().item() <= 1e-6:
             refined = alpha_map[batch_index : batch_index + 1]
