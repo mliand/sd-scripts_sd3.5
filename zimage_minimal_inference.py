@@ -845,8 +845,10 @@ def run_layerbind_forward(
                 patch_size=x_meta["patch_size"],
                 f_patch_size=x_meta["f_patch_size"],
             )
-            if region_state["text_tokens"] is None:
-                region_state["text_tokens"] = region_condition["tokens"].clone()
+            # Reset region text every denoising timestep, then allow Phase 1 to co-evolve it
+            # within the current timestep only. This matches fixed prompt conditioning better
+            # than carrying a mutated text state across timesteps.
+            region_state["text_tokens"] = region_condition["tokens"].clone()
     elif phase == "phase2":
         for region_state, region_condition in zip(region_states, region_conditions):
             if region_state["indices"].numel() == 0:
@@ -867,8 +869,7 @@ def run_layerbind_forward(
             # current global latent at every denoising timestep to stay on the ODE path.
             region_state["phase2_tokens"] = region_tokens.clone()
             region_state["phase2_step_index"] = int(step_index)
-            if region_state["text_tokens"] is None:
-                region_state["text_tokens"] = region_condition["tokens"].clone()
+            region_state["text_tokens"] = region_condition["tokens"].clone()
 
     for layer_idx, layer in enumerate(transformer.layers):
         unified, _ = transformer.build_unified_tokens(x_tokens, x_freqs_cis, cap_tokens_current, cap_freqs_current)
@@ -914,7 +915,7 @@ def run_layerbind_forward(
                         include_query_in_kv=True,
                         query_length=region_state["branch_tokens"].shape[1],
                         context_lengths=[region_state["text_tokens"].shape[1]],
-                        context_roles=["text_anchor"],
+                        context_roles=["text"],
                     )
                     region_state["branch_tokens"] = layer.contextual_forward(
                         region_state["branch_tokens"],
@@ -954,7 +955,7 @@ def run_layerbind_forward(
                         include_query_in_kv=False,
                         query_length=region_state["branch_tokens"].shape[1],
                         context_lengths=[background_tokens.shape[1], region_state["text_tokens"].shape[1]],
-                        context_roles=["local_global", "text_anchor"],
+                        context_roles=["local_global", "text"],
                     )
                     region_state["branch_tokens"] = layer.contextual_forward(
                         region_state["branch_tokens"],
@@ -966,6 +967,22 @@ def run_layerbind_forward(
                         segment_logit_biases=branch_segment_biases,
                     )
                 region_state["alpha_mask"] = None
+                text_include_query = include_query_in_kv
+                text_segment_biases = build_layerbind_segment_logit_biases(
+                    include_query_in_kv=text_include_query,
+                    query_length=region_state["text_tokens"].shape[1],
+                    context_lengths=[region_state["branch_tokens"].shape[1], local_background_tokens.shape[1]],
+                    context_roles=["branch", "local_global"],
+                )
+                region_state["text_tokens"] = layer.contextual_forward(
+                    region_state["text_tokens"],
+                    region_condition["freqs"],
+                    context_states=[region_state["branch_tokens"], local_background_tokens],
+                    context_freqs_cis=[branch_freqs, local_background_freqs],
+                    adaln_input=adaln_input,
+                    include_query_in_kv=text_include_query,
+                    segment_logit_biases=text_segment_biases,
+                )
 
         elif phase == "phase2":
             global_x_tokens = x_tokens

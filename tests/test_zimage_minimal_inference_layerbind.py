@@ -547,3 +547,56 @@ def test_phase2_reseeds_from_current_global_tokens_each_timestep(monkeypatch):
 
     assert torch.allclose(captured_queries[0], expected_b)
     assert not torch.allclose(captured_queries[0], first_call_first_query)
+
+
+def test_phase1_reseeds_region_text_tokens_each_timestep():
+    transformer = create_tiny_zimage_model()
+    device = torch.device("cpu")
+    cap_mask = torch.tensor([[True, True, True]], device=device)
+    cap_feats = torch.randn(1, 3, 12, device=device)
+    scene_tokens, scene_freqs = transformer.prepare_caption_tokens(cap_feats, cap_mask, apply_context_refiner=False)
+    region_tokens, region_freqs = transformer.prepare_caption_tokens(cap_feats, cap_mask, apply_context_refiner=False)
+
+    scene_condition = {"tokens": scene_tokens.clone(), "mask": cap_mask, "freqs": scene_freqs}
+    background_condition = {"tokens": scene_tokens.clone(), "mask": cap_mask, "freqs": scene_freqs}
+    region_conditions = [{"tokens": region_tokens.clone(), "freqs": region_freqs}]
+    region_states = [
+        {
+            "layer_index": 1,
+            "bbox": (0, 0, 16, 16),
+            "prompt": "object",
+            "indices": torch.tensor([0], device=device),
+            "background_indices": torch.tensor([1, 2, 3], device=device),
+            "foreign_region_indices": torch.zeros((0,), dtype=torch.long, device=device),
+            "is_occluding_hint": False,
+            "branch_patches": None,
+            "branch_tokens": None,
+            "text_tokens": torch.full_like(region_tokens, 9.0),
+            "region_mask": torch.ones((1, 1, 1), device=device),
+            "alpha_mask": None,
+        }
+    ]
+
+    sigmas = torch.tensor([1.0, 0.5, 0.0], device=device)
+    latent = torch.randn(1, 16, 1, 4, 4, device=device)
+    zimage_minimal_inference.run_layerbind_forward(
+        transformer,
+        latent,
+        torch.tensor([0.5], device=device),
+        sigmas,
+        0,
+        scene_condition,
+        background_condition,
+        region_conditions,
+        region_states,
+        phase="phase1",
+        hard_binding_layers=[],
+        beta=0.7,
+        blend_mode="alpha",
+        gamma=0.9,
+        poisson_lambda=0.5,
+        phase2_delta_scale=0.5,
+        apply_phase1_blend=False,
+    )
+
+    assert not torch.allclose(region_states[0]["text_tokens"], torch.full_like(region_tokens, 9.0))

@@ -20,11 +20,31 @@
 ## 3. 最新状态摘要
 
 - 当前分支：`layerbind`
-- 最近一次关键提交：`141e3d6`
-- 当前工作树：已追加一轮未提交的 `Phase2 timestep re-seed` 修复
+- 最近一次关键提交：`cc9dc91`
+- 当前工作树：已追加一轮未提交的 `Phase1 text/image co-evolution restore` 修复
 - 当前主线目标：减少 `region 与 background` 割裂、提升主体对齐。
 
 ## 4. 改进记录
+
+### 2026-03-31 / `pending`
+
+- 背景问题：
+  - 修掉 `Phase2` 跨 timestep 复用后，noise 消失，但 region 退化为纯白色块，说明局部路径没有继续写入实例语义，只保留了背景基色。
+  - 根因判断为：此前把 `Phase1` 的 `text_tokens` 护理也一起去掉后，在 `Z-Image` 这种共享式文本-图像 self-attn 里，branch 缺少足够的层内多模态耦合，难以形成稳定实例。
+- 改动点：
+  - `Phase1` 恢复 `text_tokens <- contextual_forward(text, [branch, local_background])` 的层内双向演化。
+  - `Phase1` 的 `region text` 改为每个 denoising timestep 都从原始 `region_condition["tokens"]` 重新初始化，避免跨 timestep 文本漂移。
+  - `Phase1` 的 branch bias 从 `text_anchor` 回调为常规 `text`，避免早期阶段过强锚定导致局部路径僵化。
+  - `Phase2` 仍保持文本冻结，只做局部图像 token 路由与顺序合成。
+- 预期收益：
+  - 恢复 `Phase1` 的实例形成能力，避免 region 只剩背景色块。
+  - 保留 `Phase2` 的稳定文本锚点策略，不再把跨步漂移问题带回来。
+- 已知风险：
+  - `Phase1` 文本-图像耦合恢复后，跨 region 污染可能有所回升，需要继续看人物/树/猫的分区情况。
+- 验证方式/结果：
+  - 本地 `python -m py_compile zimage_minimal_inference.py tests/test_zimage_minimal_inference_layerbind.py` 通过。
+  - 新增回归测试：`test_phase1_reseeds_region_text_tokens_each_timestep`。
+  - `pytest -q tests/test_zimage_minimal_inference_layerbind.py` 仍无法执行，当前环境缺少 `torch`。
 
 ### 2026-03-31 / `pending`
 
