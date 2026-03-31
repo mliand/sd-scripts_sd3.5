@@ -360,6 +360,7 @@ class ZImageAttention(nn.Module):
         context_freqs_cis: Optional[Sequence[torch.Tensor] | torch.Tensor] = None,
         attn_params: Optional[AttentionParams] = None,
         include_query_in_kv: bool = True,
+        segment_logit_biases: Optional[Sequence[float]] = None,
     ) -> torch.Tensor:
         context_list = self._normalize_context_states(context_states)
         context_freqs_list = self._normalize_context_freqs(context_freqs_cis, len(context_list))
@@ -371,10 +372,45 @@ class ZImageAttention(nn.Module):
 
         kv_states = torch.cat(kv_parts, dim=1) if len(kv_parts) > 1 else kv_parts[0]
         kv_freqs_cis = self._concat_freqs(query_freqs_cis, context_freqs_list, include_query_in_kv)
+        segment_lengths = []
+        if include_query_in_kv:
+            segment_lengths.append(int(query_states.shape[1]))
+        segment_lengths.extend(int(context.shape[1]) for context in context_list)
 
         query, gate_score, dtype = self._project_query(query_states, query_freqs_cis)
         key, value = self._project_key_value(kv_states, kv_freqs_cis, dtype=dtype)
-        hidden_states = attention(query, key, value, attn_params=attn_params)
+        effective_attn_params = attn_params
+        if segment_logit_biases is not None:
+            if len(segment_logit_biases) != len(segment_lengths):
+                raise ValueError(f"Expected {len(segment_lengths)} segment biases, got {len(segment_logit_biases)}")
+            token_bias = torch.zeros(
+                (query.shape[0], 1, query.shape[1], key.shape[1]),
+                device=query.device,
+                dtype=query.dtype,
+            )
+            cursor = 0
+            for length, bias in zip(segment_lengths, segment_logit_biases):
+                if length > 0 and float(bias) != 0.0:
+                    token_bias[:, :, :, cursor : cursor + length] = float(bias)
+                cursor += length
+
+            effective_attn_params = AttentionParams.create_attention_params("torch", False)
+            if attn_params is not None and attn_params.attention_mask is not None:
+                base_mask = attn_params.attention_mask
+                if base_mask.dtype == torch.bool:
+                    base_mask = torch.where(
+                        base_mask,
+                        torch.zeros(1, device=query.device, dtype=query.dtype),
+                        torch.full((1,), float("-inf"), device=query.device, dtype=query.dtype),
+                    )
+                else:
+                    base_mask = base_mask.to(device=query.device, dtype=query.dtype)
+                if base_mask.ndim == 4 and base_mask.shape[2] == 1 and query.shape[1] > 1:
+                    base_mask = base_mask.expand(-1, -1, query.shape[1], -1)
+                token_bias = token_bias + base_mask
+            effective_attn_params.attention_mask = token_bias
+
+        hidden_states = attention(query, key, value, attn_params=effective_attn_params)
         return self._finalize_attention_output(hidden_states, gate_score, dtype)
 
     @staticmethod
@@ -625,6 +661,7 @@ class ZImageTransformerBlock(nn.Module):
         adaln_input: Optional[torch.Tensor] = None,
         attn_params: Optional[AttentionParams] = None,
         include_query_in_kv: bool = True,
+        segment_logit_biases: Optional[Sequence[float]] = None,
     ) -> torch.Tensor:
         context_list = self._normalize_context_states(context_states)
         context_freqs_list = self._normalize_context_freqs(context_freqs_cis, len(context_list))
@@ -640,6 +677,7 @@ class ZImageTransformerBlock(nn.Module):
                 context_freqs_cis=context_freqs_list,
                 attn_params=attn_params,
                 include_query_in_kv=include_query_in_kv,
+                segment_logit_biases=segment_logit_biases,
             )
             return self._apply_attention_and_ffn(query_states, attn_out)
 
@@ -653,6 +691,7 @@ class ZImageTransformerBlock(nn.Module):
             context_freqs_cis=context_freqs_list,
             attn_params=attn_params,
             include_query_in_kv=include_query_in_kv,
+            segment_logit_biases=segment_logit_biases,
         )
         return self._apply_attention_and_ffn(query_states, attn_out, scale_mlp=scale_mlp, gate_msa=gate_msa, gate_mlp=gate_mlp)
 

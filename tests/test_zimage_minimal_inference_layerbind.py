@@ -330,7 +330,7 @@ def test_phase1_blend_uses_direct_for_non_overlapping_layers(monkeypatch):
     monkeypatch.setattr(
         zimage_minimal_inference.zimage_layerbind_utils,
         "estimate_alpha_from_token_difference",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not be called for non-overlap")),
+        lambda *args, **kwargs: (torch.tensor([[[0.25]]]), torch.tensor([[[1.0]]])),
     )
 
     blended = zimage_minimal_inference.blend_region_tokens(
@@ -347,6 +347,7 @@ def test_phase1_blend_uses_direct_for_non_overlapping_layers(monkeypatch):
     assert blended[0, 1, 0].item() == 2.0
     assert region_states[1]["alpha_mask"] is None
     assert region_states[1]["is_occluding"] is False
+    assert abs(region_states[1]["region_mask"][0, 0, 0].item() - 1.0) < 1e-6
 
 
 def test_phase2_composition_uses_beta_times_binary_mask_once():
