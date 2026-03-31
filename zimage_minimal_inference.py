@@ -793,7 +793,13 @@ def run_layerbind_forward(
         # Lightly inject scene semantics into the background-driven global path.
         # Keep the weight conservative to avoid destabilizing the currently stable baseline.
         phase1_scene_mix = 0.15
-        cap_tokens = background_condition["tokens"].lerp(scene_condition["tokens"], phase1_scene_mix)
+        cap_tokens = background_condition["tokens"].clone()
+        mix_length = min(cap_tokens.shape[1], scene_condition["tokens"].shape[1])
+        if mix_length > 0:
+            cap_tokens[:, :mix_length] = cap_tokens[:, :mix_length].lerp(
+                scene_condition["tokens"][:, :mix_length],
+                phase1_scene_mix,
+            )
         cap_mask = background_condition["mask"]
         cap_freqs = background_condition["freqs"]
     else:

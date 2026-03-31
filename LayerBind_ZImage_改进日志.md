@@ -33,7 +33,7 @@
   - 直接切到纯 `scene_condition` 之前已经验证会打坏稳定性，因此只能做轻量注入。
 - 改动点：
   - `Phase1` 主路径改为保守的 `background + scene` 混合：
-    - `cap_tokens = lerp(background_tokens, scene_tokens, 0.15)`
+    - 对 `background_tokens` 与 `scene_tokens` 的共享前缀做 `lerp(..., 0.15)`
   - 只在 `Phase1` 生效，`Phase2` 保持原样。
   - `cap_mask/cap_freqs` 仍沿用 `background_condition`，不改序列结构。
 - 预期收益：
