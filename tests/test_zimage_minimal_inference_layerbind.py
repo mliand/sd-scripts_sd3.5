@@ -146,6 +146,26 @@ def test_create_image_freqs_for_caption_length_matches_requested_offset():
     assert freqs[0, 0, 0].item() == 6.0
 
 
+def test_create_region_local_freqs_rebases_to_region_origin():
+    class FakeTransformer:
+        def rope_embedder(self, position_ids):
+            return position_ids.to(dtype=torch.float32)
+
+    freqs = zimage_minimal_inference.create_region_local_freqs_for_caption_length(
+        FakeTransformer(),
+        token_shape=(1, 4, 4),
+        token_indices=torch.tensor([5, 6, 9, 10], dtype=torch.long),
+        cap_seq_len=7,
+        batch_size=1,
+        device=torch.device("cpu"),
+    )
+
+    expected = torch.tensor(
+        [[[8.0, 0.0, 0.0], [8.0, 0.0, 1.0], [8.0, 1.0, 0.0], [8.0, 1.0, 1.0]]]
+    )
+    assert torch.allclose(freqs, expected)
+
+
 def test_build_layerbind_local_context_indices_returns_full_global_context():
     indices = zimage_minimal_inference.build_layerbind_local_context_indices(
         region_indices=torch.tensor([1, 3], dtype=torch.long),

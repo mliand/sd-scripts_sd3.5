@@ -425,6 +425,43 @@ def create_image_freqs_for_caption_length(
     return freqs_cis.unsqueeze(0).expand(batch_size, -1, -1)
 
 
+def create_region_local_freqs_for_caption_length(
+    transformer,
+    token_shape: tuple[int, int, int],
+    token_indices: torch.Tensor,
+    cap_seq_len: int,
+    batch_size: int,
+    device: torch.device,
+):
+    indices = token_indices.to(device=device, dtype=torch.long)
+    if indices.numel() == 0:
+        position_ids = torch.zeros((0, 3), device=device, dtype=torch.int32)
+        freqs_cis = transformer.rope_embedder(position_ids)
+        return freqs_cis.unsqueeze(0).expand(batch_size, -1, -1)
+
+    f_tokens, h_tokens, w_tokens = token_shape
+    tokens_per_frame = h_tokens * w_tokens
+
+    f_idx = torch.div(indices, tokens_per_frame, rounding_mode="floor")
+    hw_idx = indices.remainder(tokens_per_frame)
+    h_idx = torch.div(hw_idx, w_tokens, rounding_mode="floor")
+    w_idx = hw_idx.remainder(w_tokens)
+
+    # Region-local geometry prior: keep temporal order, but reset spatial coordinates
+    # to the local bbox frame so the branch learns to occupy the region itself rather
+    # than a sparse subset of globally positioned tokens.
+    position_ids = torch.stack(
+        [
+            cap_seq_len + 1 + (f_idx - f_idx.min()),
+            h_idx - h_idx.min(),
+            w_idx - w_idx.min(),
+        ],
+        dim=1,
+    ).to(dtype=torch.int32)
+    freqs_cis = transformer.rope_embedder(position_ids)
+    return freqs_cis.unsqueeze(0).expand(batch_size, -1, -1)
+
+
 def prepare_branch_image_tokens(
     transformer,
     branch_patches: torch.Tensor,
@@ -791,15 +828,15 @@ def run_layerbind_forward(
         for region_state, region_condition in zip(region_states, region_conditions):
             if region_state["indices"].numel() == 0:
                 continue
-            region_x_freqs = create_image_freqs_for_caption_length(
+            branch_freqs = create_region_local_freqs_for_caption_length(
                 transformer,
                 x_meta["token_shape"],
+                region_state["indices"],
                 cap_seq_len=region_condition["tokens"].shape[1],
                 batch_size=x_tokens.shape[0],
                 device=x_tokens.device,
             )
             branch_seed = image_patches.index_select(1, region_state["indices"])
-            branch_freqs = region_x_freqs.index_select(1, region_state["indices"])
             if region_state["branch_patches"] is None or region_state["branch_patches"].shape != branch_seed.shape:
                 # Phase 1 starts from the same latent noise patches as the global path, then evolves independently.
                 region_state["branch_patches"] = branch_seed.clone()
@@ -832,17 +869,17 @@ def run_layerbind_forward(
                 if region_state["indices"].numel() == 0:
                     continue
 
-                region_x_freqs = create_image_freqs_for_caption_length(
+                branch_freqs = create_region_local_freqs_for_caption_length(
                     transformer,
                     x_meta["token_shape"],
+                    region_state["indices"],
                     cap_seq_len=region_condition["tokens"].shape[1],
                     batch_size=x_tokens.shape[0],
                     device=x_tokens.device,
                 )
-                _, branch_freqs = transformer.select_token_subset(x_tokens, region_state["indices"], region_x_freqs)
                 local_context_indices = region_state.get("context_indices", region_state["background_indices"])
                 background_tokens, background_freqs = transformer.select_token_subset(
-                    x_tokens, local_context_indices, region_x_freqs
+                    x_tokens, local_context_indices, x_freqs_cis
                 )
                 local_background_tokens = background_tokens
                 local_background_freqs = background_freqs
@@ -941,16 +978,15 @@ def run_layerbind_forward(
             for region_state, region_condition in zip(region_states, region_conditions):
                 if region_state["indices"].numel() == 0:
                     continue
-                region_x_freqs = create_image_freqs_for_caption_length(
+                region_freqs = create_region_local_freqs_for_caption_length(
                     transformer,
                     x_meta["token_shape"],
+                    region_state["indices"],
                     cap_seq_len=region_condition["tokens"].shape[1],
                     batch_size=global_x_tokens.shape[0],
                     device=global_x_tokens.device,
                 )
-                region_tokens, region_freqs = transformer.select_token_subset(
-                    global_x_tokens, region_state["indices"], region_x_freqs
-                )
+                region_tokens = global_x_tokens.index_select(1, region_state["indices"])
                 if region_state["text_tokens"] is None:
                     region_state["text_tokens"] = region_condition["tokens"].clone()
                 include_query_in_kv = False
