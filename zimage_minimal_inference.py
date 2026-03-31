@@ -435,6 +435,8 @@ def build_layerbind_segment_logit_biases(
             bias += 1.0
         elif role == "text_anchor":
             bias += 1.25
+        elif role == "phase1_text_anchor":
+            bias += 1.15
         elif role == "scene_text":
             bias += 0.2
         elif role == "branch":
@@ -443,6 +445,8 @@ def build_layerbind_segment_logit_biases(
             bias += 0.0
         elif role == "local_global_sparse":
             bias -= 0.15
+        elif role == "phase1_local_global_sparse":
+            bias -= 0.10
         biases.append(bias)
 
     return biases
@@ -845,8 +849,9 @@ def run_layerbind_forward(
                 patch_size=x_meta["patch_size"],
                 f_patch_size=x_meta["f_patch_size"],
             )
-            if region_state["text_tokens"] is None:
-                region_state["text_tokens"] = region_condition["tokens"].clone()
+            # Re-anchor Phase 1 to the original region prompt every denoising step so
+            # branch text semantics do not drift toward neighboring regions.
+            region_state["text_tokens"] = region_condition["tokens"].clone()
 
     for layer_idx, layer in enumerate(transformer.layers):
         unified, _ = transformer.build_unified_tokens(x_tokens, x_freqs_cis, cap_tokens_current, cap_freqs_current)
@@ -892,7 +897,7 @@ def run_layerbind_forward(
                         include_query_in_kv=True,
                         query_length=region_state["branch_tokens"].shape[1],
                         context_lengths=[region_state["text_tokens"].shape[1]],
-                        context_roles=["text"],
+                        context_roles=["phase1_text_anchor"],
                     )
                     region_state["branch_tokens"] = layer.contextual_forward(
                         region_state["branch_tokens"],
@@ -932,7 +937,7 @@ def run_layerbind_forward(
                         include_query_in_kv=False,
                         query_length=region_state["branch_tokens"].shape[1],
                         context_lengths=[background_tokens.shape[1], region_state["text_tokens"].shape[1]],
-                        context_roles=["local_global", "text"],
+                        context_roles=["phase1_local_global_sparse", "phase1_text_anchor"],
                     )
                     region_state["branch_tokens"] = layer.contextual_forward(
                         region_state["branch_tokens"],

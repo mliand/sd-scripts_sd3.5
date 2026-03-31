@@ -29,6 +29,28 @@
 ### 2026-03-31 / `pending`
 
 - 背景问题：
+  - 当前稳定基线下，树和猫相对更容易对齐，但女孩 region 仍然容易偏位，说明问题更集中在 `Phase1` 的早期实例形成阶段。
+  - 推断根因是 `Phase1` 中 region text 会在层间/步间逐渐漂移，中心大区域又更容易被局部背景上下文带偏。
+- 改动点：
+  - `Phase1` 每个 denoising timestep 开始时，都把 `region_state["text_tokens"]` 重新置回原始 `region_condition["tokens"]`。
+  - `Phase1` branch 更新新增轻量 bias 角色：
+    - `phase1_text_anchor`
+    - `phase1_local_global_sparse`
+  - 仅提升 `Phase1` 中 region text 对 branch 的牵引力，并轻微压低背景上下文竞争。
+  - `Phase2`、`t1 blending`、主路径条件保持不变。
+- 预期收益：
+  - 提升女孩等弱 region 在 `Phase1` 的主体成形稳定性。
+  - 保持当前稳定基线，不把问题重新扩散到 `Phase2` 或全局主干。
+- 已知风险：
+  - 若 `Phase1` 文本锚定过强，可能会带来少量局部填满感或串区回升。
+- 验证方式/结果：
+  - 本地会执行静态校验。
+  - 新增回归测试：`test_phase1_resets_region_text_tokens_from_prompt_each_timestep`。
+  - `pytest` 仍受当前环境缺少 `torch` 限制。
+
+### 2026-03-31 / `pending`
+
+- 背景问题：
   - 当前稳定基线 + `Phase2` bias 增强后，主体收益明显，但示例 layout 中 region prompt 仍带 `white background`，会继续把局部背景语义压回 region 条件里。
 - 改动点：
   - 示例配置 [examples/layerbind_layout_example.json](/home/coco/workspace/sd-scripts_sd3.5/examples/layerbind_layout_example.json) 的 region prompt 改为纯主体描述：
