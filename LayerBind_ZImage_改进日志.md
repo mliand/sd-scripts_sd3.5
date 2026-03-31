@@ -29,6 +29,44 @@
 ### 2026-03-31 / `pending`
 
 - 背景问题：
+  - `Phase2 residual suppression` 实测对 region 内灰色/彩色色块是 0 收益。
+  - 这说明问题不在 residual 大小后处理，而在更前面的 attention 路径本身：
+    - 当前 `Phase2` 让整个 bbox 都作为 query 参与 local attention
+    - 非主体 token 在算子层面就被 region text 染色，后面再 suppress/blend 也只是补救
+- 改动点：
+  - 回退上一版无收益的 `residual suppression` 方向。
+  - `Phase2` 改为 `foreground-query-only local attention`：
+    - 只让动态前景 token 参与 local attention
+    - bbox 内其余 token 完全保留 global path，不再被 region text 直接更新
+  - query token 由当前 `alpha_mask` 优先决定，若不足则用 top-k 保底。
+  - 新增测试：验证 `Phase2` query 选择优先使用前景 alpha。
+- 预期收益：
+  - 从 attention 源头减少 bbox 内非主体 token 被局部语义染色。
+  - 比后处理 suppression 更直接地减少灰色/彩色色块。
+- 已知风险：
+  - 若 query token 选得过少，主体细节强化可能不足。
+  - alpha 估计不稳时，foreground query 集也可能抖动。
+- 验证方式/结果：
+  - 本地执行静态校验。
+  - 单元测试仍受当前环境是否具备 `torch` 限制。
+
+### 2026-03-31 / `reverted`
+
+- 背景问题：
+  - 在 `Phase2 delta alpha merge` 后，region 内色块与背景/主体的融合更自然，但灰色/彩色色块数量没有明显减少。
+  - 这说明问题已不主要在 compositing，而更在 `Phase2 local token` 本身仍带有较强脏残差。
+- 改动点：
+  - 曾在 `Phase2` 中新增 `alpha-guided residual suppression`：
+    - 先根据当前层动态估计的 `alpha_mask` 压低低置信区域残差
+    - 再对异常大的 residual norm 做裁剪
+  - 该方向实测 0 收益，已回退，不属于当前有效实现。
+- 结论：
+  - 后处理 residual 大小不足以解决色块问题。
+  - 更根因的是 `Phase2` query 范围过大，导致非主体 token 在 attention 阶段就被局部文本染色。
+
+### 2026-03-31 / `pending`
+
+- 背景问题：
   - 在新增 `Phase2 residual suppression` 后，`bf16` 推理出现 dtype 写回错误：
     - `index_copy_(): self and source expected to have the same dtype, but got (self) BFloat16 and (source) Float`
 - 改动点：
@@ -42,27 +80,6 @@
   - 无额外算法风险，属于实现修复。
 - 验证方式/结果：
   - 本地 `py_compile` 通过。
-
-### 2026-03-31 / `pending`
-
-- 背景问题：
-  - 在 `Phase2 delta alpha merge` 后，region 内色块与背景/主体的融合更自然，但灰色/彩色色块数量没有明显减少。
-  - 这说明问题已不主要在 compositing，而更在 `Phase2 local token` 本身仍带有较强脏残差。
-- 改动点：
-  - 在 `Phase2` 中新增 `alpha-guided residual suppression`：
-    - 先根据当前层动态估计的 `alpha_mask` 压低低置信区域残差
-    - 再对异常大的 residual norm 做裁剪
-  - 目标是在 local token 写回前，就把“彩色色块来源”的大残差压回去。
-  - 新增测试：验证 suppression 会保留高 alpha 区域的增量，同时把低 alpha 区域回退到 region/global 基线。
-- 预期收益：
-  - 直接减少 region 内彩色色块噪声的源头。
-  - 保留主体强化，同时降低非主体 token 的异常激活。
-- 已知风险：
-  - 若 suppression 过强，主体细节也可能被一并削弱。
-  - 该策略依赖当前 alpha 估计质量，若 alpha 偏差较大，抑制范围也会偏差。
-- 验证方式/结果：
-  - 本地执行静态校验。
-  - 单元测试仍受当前环境是否具备 `torch` 限制。
 
 ### 2026-03-31 / `pending`
 

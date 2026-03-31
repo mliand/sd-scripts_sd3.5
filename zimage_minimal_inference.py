@@ -25,7 +25,8 @@ init_ipex()
 
 LAYERBIND_PHASE2_TEXT_UPDATE_SCALE = 0.35
 LAYERBIND_PHASE2_DELTA_ALPHA_POWER = 1.5
-LAYERBIND_PHASE2_RESIDUAL_CLIP_MULTIPLIER = 2.5
+LAYERBIND_PHASE2_QUERY_ALPHA_THRESHOLD = 0.35
+LAYERBIND_PHASE2_QUERY_MIN_FRACTION = 0.15
 
 
 def parse_layer_spec(text: str):
@@ -734,30 +735,26 @@ def compose_phase2_region_tokens(
     return composed
 
 
-def suppress_phase2_local_residual(
-    region_tokens: torch.Tensor,
-    local_tokens: torch.Tensor,
-    alpha_mask: torch.Tensor,
-):
-    if local_tokens.shape != region_tokens.shape:
-        raise ValueError(f"local/region token shapes must match, got {tuple(local_tokens.shape)} vs {tuple(region_tokens.shape)}")
+def select_phase2_query_positions(region_state: dict[str, Any]) -> torch.Tensor:
+    region_mask = region_state.get("region_mask")
+    if region_mask is None or region_mask.ndim != 3 or region_mask.shape[1] == 0:
+        return torch.zeros((0,), device=region_state["indices"].device, dtype=torch.long)
 
-    alpha = alpha_mask.to(dtype=local_tokens.dtype, device=local_tokens.device)
-    if alpha.shape[0] == 1 and local_tokens.shape[0] > 1:
-        alpha = alpha.expand(local_tokens.shape[0], -1, -1)
+    if region_state.get("alpha_mask") is not None:
+        score = region_state["alpha_mask"].detach().mean(dim=0).squeeze(-1)
+    else:
+        score = region_mask.detach().mean(dim=0).squeeze(-1).to(dtype=torch.float32)
 
-    residual = local_tokens - region_tokens
-    gated_residual = residual * alpha
+    num_tokens = int(score.numel())
+    min_queries = max(1, math.ceil(num_tokens * LAYERBIND_PHASE2_QUERY_MIN_FRACTION))
+    active = torch.nonzero(score >= LAYERBIND_PHASE2_QUERY_ALPHA_THRESHOLD, as_tuple=False).flatten()
+    if active.numel() >= min_queries:
+        return active.to(device=region_state["indices"].device, dtype=torch.long)
 
-    residual_norm = torch.linalg.vector_norm(gated_residual, dim=-1, keepdim=True)
-    valid_norms = residual_norm[alpha > 1e-4]
-    if valid_norms.numel() > 0:
-        clip_threshold = torch.quantile(valid_norms.to(dtype=torch.float32), 0.75).to(dtype=local_tokens.dtype)
-        clip_threshold = clip_threshold * LAYERBIND_PHASE2_RESIDUAL_CLIP_MULTIPLIER
-        scale = torch.clamp(clip_threshold / residual_norm.clamp(min=1e-6), max=1.0).to(dtype=local_tokens.dtype)
-        gated_residual = gated_residual * scale
-
-    return (region_tokens + gated_residual).to(dtype=local_tokens.dtype)
+    topk = min(num_tokens, min_queries)
+    if topk <= 0:
+        return torch.zeros((0,), device=region_state["indices"].device, dtype=torch.long)
+    return torch.topk(score, k=topk, dim=0).indices.sort().values.to(device=region_state["indices"].device, dtype=torch.long)
 
 
 def save_debug_image(vae, latents: torch.Tensor, file_path: str):
@@ -1026,19 +1023,24 @@ def run_layerbind_forward(
                 region_tokens = global_x_tokens.index_select(1, region_state["indices"])
                 if region_state["text_tokens"] is None:
                     region_state["text_tokens"] = region_condition["tokens"].clone()
+                query_positions = select_phase2_query_positions(region_state)
+                if query_positions.numel() == 0:
+                    query_positions = torch.arange(region_tokens.shape[1], device=region_tokens.device, dtype=torch.long)
+                query_tokens = region_tokens.index_select(1, query_positions)
+                query_freqs = region_freqs.index_select(1, query_positions)
                 include_query_in_kv = False
                 local_segment_biases = build_layerbind_segment_logit_biases(
                     include_query_in_kv=include_query_in_kv,
-                    query_length=region_tokens.shape[1],
+                    query_length=query_tokens.shape[1],
                     context_lengths=[
                         region_state["text_tokens"].shape[1],
                         global_x_tokens.shape[1],
                     ],
                     context_roles=["text_anchor", "local_global"],
                 )
-                local_tokens = layer.contextual_forward(
-                    region_tokens,
-                    region_freqs,
+                updated_query_tokens = layer.contextual_forward(
+                    query_tokens,
+                    query_freqs,
                     context_states=[region_state["text_tokens"], global_x_tokens],
                     context_freqs_cis=[region_condition["freqs"], x_freqs_cis],
                     adaln_input=adaln_input,
@@ -1046,7 +1048,11 @@ def run_layerbind_forward(
                     segment_logit_biases=local_segment_biases,
                 )
                 region_injection_scale = 1.0 if region_state.get("is_occluding", False) else 0.60
-                local_tokens = region_tokens.lerp(local_tokens, float(phase2_delta_scale) * region_injection_scale)
+                updated_query_tokens = query_tokens.lerp(
+                    updated_query_tokens, float(phase2_delta_scale) * region_injection_scale
+                )
+                local_tokens = region_tokens.clone()
+                local_tokens.index_copy_(1, query_positions, updated_query_tokens.to(dtype=local_tokens.dtype))
                 region_state["branch_tokens"] = local_tokens
                 alpha_mask = zimage_layerbind_utils.estimate_alpha_from_token_difference(
                     local_tokens,
@@ -1058,7 +1064,6 @@ def run_layerbind_forward(
                     return_binary_mask=False,
                 )
                 alpha_mask = alpha_mask.pow(LAYERBIND_PHASE2_DELTA_ALPHA_POWER)
-                local_tokens = suppress_phase2_local_residual(region_tokens, local_tokens, alpha_mask)
                 region_state["alpha_mask"] = alpha_mask
                 text_segment_biases = build_layerbind_segment_logit_biases(
                     include_query_in_kv=False,

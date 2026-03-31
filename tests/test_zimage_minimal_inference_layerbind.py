@@ -475,20 +475,16 @@ def test_phase2_composition_prefers_soft_alpha_delta_merge():
     assert abs(composed[0, 1, 0].item() - 2.0) < 1e-6
 
 
-def test_suppress_phase2_local_residual_respects_alpha_mask():
-    region_tokens = torch.tensor([[[2.0], [2.0]]])
-    local_tokens = torch.tensor([[[10.0], [10.0]]])
-    alpha_mask = torch.tensor([[[0.5], [0.0]]])
+def test_select_phase2_query_positions_prefers_alpha_foreground():
+    region_state = {
+        "indices": torch.tensor([10, 11, 12, 13], dtype=torch.long),
+        "region_mask": torch.tensor([[[1.0], [1.0], [1.0], [1.0]]]),
+        "alpha_mask": torch.tensor([[[0.8], [0.4], [0.1], [0.0]]]),
+    }
 
-    suppressed = zimage_minimal_inference.suppress_phase2_local_residual(
-        region_tokens,
-        local_tokens,
-        alpha_mask,
-    )
+    selected = zimage_minimal_inference.select_phase2_query_positions(region_state)
 
-    assert suppressed[0, 0, 0].item() > 2.0
-    assert suppressed[0, 0, 0].item() < 10.0
-    assert abs(suppressed[0, 1, 0].item() - 2.0) < 1e-6
+    assert torch.equal(selected, torch.tensor([0, 1], dtype=torch.long))
 
 
 def test_phase1_resets_region_text_tokens_from_prompt_each_timestep(monkeypatch):
