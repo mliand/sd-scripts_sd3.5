@@ -21,10 +21,29 @@
 
 - 当前分支：`layerbind`
 - 最近一次关键提交：`cc9dc91`
-- 当前工作树：已追加一轮未提交的 `t1 bottom masked-direct` 修复
+- 当前工作树：已追加一轮未提交的 `Phase1 main path -> scene condition` 修复
 - 当前主线目标：减少 `region 与 background` 割裂、提升主体对齐。
 
 ## 4. 改进记录
+
+### 2026-03-31 / `pending`
+
+- 背景问题：
+  - 当前输出表现为“只有 background prompt 生效”，scene/region 语义几乎起不来，最终 region 位置对但内容是空白浅色色块。
+  - 根因是 `Phase1` 的全局主路径仍由 `background_prompt` 驱动；对 `Z-Image` 这种共享式文本-图像 self-attn，这会让主干过度收敛到背景语义，region/scene 只剩弱旁路注入。
+- 改动点：
+  - `Phase1` 的 `active_condition` 从 `background_condition` 切为 `scene_condition`，即两阶段主路径都使用 scene text。
+  - 保留 LayerBind 的 branch / mask / sequential compositing 控制对象落点，不再依赖 `T_bg` 作为全局主导。
+  - 示例 layout 的 `region_prompt` 去掉 `white background`，白底只保留在 `background_prompt / scene_prompt`，避免 region prompt 本身继续强化空白背景。
+- 预期收益：
+  - 让全局主干先具备对象与风格语义，再由 LayerBind 负责位置与遮挡约束。
+  - 减少“只有白底生效、对象完全不出来”的失败模式。
+- 已知风险：
+  - 这比前一轮 `t1` 修正更进一步偏离论文 `Phase1 = T_bg` 的定义，属于明确的 `Z-Image` 结构适配。
+  - 若 scene 主路径过强，可能重新引入全局对象串区，需要继续观察。
+- 验证方式/结果：
+  - 待你在另一台实际模型环境回归验证。
+  - 本地静态校验会在提交前执行。
 
 ### 2026-03-31 / `pending`
 

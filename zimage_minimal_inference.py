@@ -788,7 +788,11 @@ def run_layerbind_forward(
     apply_phase1_blend: bool,
     layer_stats_accumulator: Optional[dict[str, Any]] = None,
 ):
-    active_condition = background_condition if phase == "phase1" else scene_condition
+    # Paper uses T_bg in Phase 1, but Z-Image's shared self-attention collapses too easily to
+    # background-only semantics if the global path is driven purely by the background prompt.
+    # Use scene text as the main global condition in both phases, and let region masking/branch
+    # logic control where object semantics land.
+    active_condition = scene_condition
     cap_tokens = active_condition["tokens"]
     cap_mask = active_condition["mask"]
     cap_freqs = active_condition["freqs"]
@@ -918,14 +922,14 @@ def run_layerbind_forward(
                     branch_segment_biases = build_layerbind_segment_logit_biases(
                         include_query_in_kv=True,
                         query_length=region_state["branch_tokens"].shape[1],
-                        context_lengths=[region_state["text_tokens"].shape[1]],
-                        context_roles=["text"],
+                        context_lengths=[region_state["text_tokens"].shape[1], scene_condition["tokens"].shape[1]],
+                        context_roles=["text", "scene_text"],
                     )
                     region_state["branch_tokens"] = layer.contextual_forward(
                         region_state["branch_tokens"],
                         branch_freqs,
-                        context_states=[region_state["text_tokens"]],
-                        context_freqs_cis=[region_condition["freqs"]],
+                        context_states=[region_state["text_tokens"], scene_condition["tokens"]],
+                        context_freqs_cis=[region_condition["freqs"], scene_condition["freqs"]],
                         adaln_input=adaln_input,
                         include_query_in_kv=True,
                         segment_logit_biases=branch_segment_biases,
@@ -958,14 +962,18 @@ def run_layerbind_forward(
                     branch_segment_biases = build_layerbind_segment_logit_biases(
                         include_query_in_kv=False,
                         query_length=region_state["branch_tokens"].shape[1],
-                        context_lengths=[background_tokens.shape[1], region_state["text_tokens"].shape[1]],
-                        context_roles=["local_global", "text"],
+                        context_lengths=[
+                            background_tokens.shape[1],
+                            region_state["text_tokens"].shape[1],
+                            scene_condition["tokens"].shape[1],
+                        ],
+                        context_roles=["local_global", "text", "scene_text"],
                     )
                     region_state["branch_tokens"] = layer.contextual_forward(
                         region_state["branch_tokens"],
                         branch_freqs,
-                        context_states=[background_tokens, region_state["text_tokens"]],
-                        context_freqs_cis=[background_freqs, region_condition["freqs"]],
+                        context_states=[background_tokens, region_state["text_tokens"], scene_condition["tokens"]],
+                        context_freqs_cis=[background_freqs, region_condition["freqs"], scene_condition["freqs"]],
                         adaln_input=adaln_input,
                         include_query_in_kv=False,
                         segment_logit_biases=branch_segment_biases,
@@ -975,14 +983,18 @@ def run_layerbind_forward(
                 text_segment_biases = build_layerbind_segment_logit_biases(
                     include_query_in_kv=text_include_query,
                     query_length=region_state["text_tokens"].shape[1],
-                    context_lengths=[region_state["branch_tokens"].shape[1], local_background_tokens.shape[1]],
-                    context_roles=["branch", "local_global"],
+                    context_lengths=[
+                        region_state["branch_tokens"].shape[1],
+                        local_background_tokens.shape[1],
+                        scene_condition["tokens"].shape[1],
+                    ],
+                    context_roles=["branch", "local_global", "scene_text"],
                 )
                 region_state["text_tokens"] = layer.contextual_forward(
                     region_state["text_tokens"],
                     region_condition["freqs"],
-                    context_states=[region_state["branch_tokens"], local_background_tokens],
-                    context_freqs_cis=[branch_freqs, local_background_freqs],
+                    context_states=[region_state["branch_tokens"], local_background_tokens, scene_condition["tokens"]],
+                    context_freqs_cis=[branch_freqs, local_background_freqs, scene_condition["freqs"]],
                     adaln_input=adaln_input,
                     include_query_in_kv=text_include_query,
                     segment_logit_biases=text_segment_biases,
