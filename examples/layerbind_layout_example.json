@@ -3,7 +3,7 @@
   "scene_prompt": "An illustration of a girl standing in the center, a cat on the right, and an apple tree on the left, clean white background",
   "negative_prompt": "bad quality,twisty,blurry,ugly,unclear,dirty,bad structure",
   "config": {
-    "eta1": 0.25,
+    "eta1": 0.20,
     "eta2": 0.7,
     "beta": 0.55,
     "phase2_delta_scale": 0.45,

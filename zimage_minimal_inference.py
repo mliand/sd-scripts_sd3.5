@@ -852,6 +852,13 @@ def run_layerbind_forward(
             # Re-anchor Phase 1 to the original region prompt every denoising step so
             # branch text semantics do not drift toward neighboring regions.
             region_state["text_tokens"] = region_condition["tokens"].clone()
+    elif phase == "phase2":
+        for region_state, region_condition in zip(region_states, region_conditions):
+            if region_state["indices"].numel() == 0:
+                continue
+            # Keep Phase 2 text semantics pinned to the original region prompt to
+            # reduce cross-region concept accumulation once positions are already stable.
+            region_state["text_tokens"] = region_condition["tokens"].clone()
 
     for layer_idx, layer in enumerate(transformer.layers):
         unified, _ = transformer.build_unified_tokens(x_tokens, x_freqs_cis, cap_tokens_current, cap_freqs_current)
@@ -1011,22 +1018,6 @@ def run_layerbind_forward(
                 )
                 region_injection_scale = 1.0 if region_state.get("is_occluding", False) else 0.60
                 local_tokens = region_tokens.lerp(local_tokens, float(phase2_delta_scale) * region_injection_scale)
-                text_include_query = False
-                text_segment_biases = build_layerbind_segment_logit_biases(
-                    include_query_in_kv=text_include_query,
-                    query_length=region_state["text_tokens"].shape[1],
-                    context_lengths=[local_tokens.shape[1]],
-                    context_roles=["branch"],
-                )
-                region_state["text_tokens"] = layer.contextual_forward(
-                    region_state["text_tokens"],
-                    region_condition["freqs"],
-                    context_states=[local_tokens],
-                    context_freqs_cis=[region_freqs],
-                    adaln_input=adaln_input,
-                    include_query_in_kv=text_include_query,
-                    segment_logit_biases=text_segment_biases,
-                )
                 region_state["branch_tokens"] = local_tokens
                 composed_x_tokens = compose_phase2_region_tokens(
                     composed_x_tokens,
@@ -1096,7 +1087,7 @@ def generate_image(
     sample_steps = prompt_dict.get("sample_steps", steps)
     width = prompt_dict.get("width", 512)
     height = prompt_dict.get("height", 512)
-    guidance_scale = prompt_dict.get("guidance_scale", prompt_dict.get("scale", 4.0))
+    guidance_scale = prompt_dict.get("guidance_scale", prompt_dict.get("scale", 7.0))
     seed = prompt_dict.get("seed")
 
     if seed is None:
@@ -1340,7 +1331,7 @@ def main():
     parser.add_argument("--disable_chat_template", action="store_true")
     parser.add_argument("--prompt", type=str, default="A photo of a cat")
     parser.add_argument("--negative_prompt", type=str, default="")
-    parser.add_argument("--guidance_scale", type=float, default=4.0)
+    parser.add_argument("--guidance_scale", type=float, default=7.0)
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--steps", type=int, default=30)
     parser.add_argument("--width", type=int, default=512)

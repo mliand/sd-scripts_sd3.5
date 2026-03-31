@@ -20,11 +20,49 @@
 ## 3. 最新状态摘要
 
 - 当前分支：`layerbind`
-- 最近一次关键提交：`8f0a559`
-- 当前工作树：已在稳定基线上追加一轮 `Phase2 text bias` 小幅增强
+- 最近一次关键提交：`0b2f158`
+- 当前工作树：已追加 `Phase2 text freeze + eta1 0.20 + default CFG 7.0`
 - 当前主线目标：减少 `region 与 background` 割裂、提升主体对齐。
 
 ## 4. 改进记录
+
+### 2026-03-31 / `pending`
+
+- 背景问题：
+  - 当前位置已经基本对齐，主要残留问题是跨 region 概念污染，以及 region/background 轻微割裂。
+  - 结合论文附录 C.2/C.3 的描述，这更像是后期语义串扰和前期过度解耦叠加。
+- 改动点：
+  - `Phase2` 每个 denoising timestep 开始时重置 `text_tokens`，并取消同一 timestep 内 `text_tokens <- local_tokens` 的层内反写，改为整个 `Phase2` 仅更新局部 image tokens。
+  - 示例 layout 的 `eta1` 从 `0.25` 下调到 `0.20`，减轻 `Phase1` 过长导致的 region/background 过度解耦。
+  - 默认 `guidance_scale` 提升到 `7.0`，统一 CLI 默认值和 `prompt_dict` 缺省回退值。
+  - 新增/收紧回归测试：`test_phase2_resets_region_text_tokens_from_prompt_each_timestep`。
+- 预期收益：
+  - 降低跨 region 语义累积。
+  - 缓解前景与背景割裂。
+  - 提升默认配置下的主体跟随强度。
+- 已知风险：
+  - 若 `eta1` 过低，局部实例初始化可能不足；若 CFG 过强，复杂提示下可能重新放大串区。
+- 验证方式/结果：
+  - 本地会执行静态校验。
+  - `pytest` 仍受当前环境缺少 `torch` 限制。
+
+### 2026-03-31 / `pending`
+
+- 背景问题：
+  - 当前树、人、猫的位置已经基本对齐，主要剩余问题变成跨 region 概念污染。
+  - 这说明定位约束已基本够用，但 `Phase2` 的文本语义仍会在步间累积，导致别的 region 概念渗入。
+- 改动点：
+  - `Phase2` 每个 denoising timestep 开始时，都把 `region_state["text_tokens"]` 重置回原始 `region_condition["tokens"]`。
+  - 保留当前 `Phase2` 的结构和 bias，不再同时改动其它路径，确保只针对语义污染收敛。
+  - 新增回归测试：`test_phase2_resets_region_text_tokens_from_prompt_each_timestep`。
+- 预期收益：
+  - 降低跨 timestep 的概念累积，减轻跨 region 串语义。
+  - 保持当前已得到的位置对齐收益。
+- 已知风险：
+  - 若 `Phase2` 文本重锚定过强，局部细节整合可能略受影响。
+- 验证方式/结果：
+  - 本地会执行静态校验。
+  - `pytest` 仍受当前环境缺少 `torch` 限制。
 
 ### 2026-03-31 / `pending`
 
