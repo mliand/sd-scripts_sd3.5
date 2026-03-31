@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 init_ipex()
 
 LAYERBIND_PHASE2_TEXT_UPDATE_SCALE = 0.35
+LAYERBIND_PHASE2_DELTA_ALPHA_POWER = 1.5
 
 
 def parse_layer_spec(text: str):
@@ -699,13 +700,20 @@ def compose_phase2_region_tokens(
     indices: torch.Tensor,
     beta: float,
     region_mask: Optional[torch.Tensor] = None,
+    alpha_mask: Optional[torch.Tensor] = None,
 ):
     if local_tokens is None or indices.numel() == 0:
         return x_tokens
 
     current = x_tokens.index_select(1, indices)
-    if region_mask is not None and region_mask.shape[1] == current.shape[1]:
-        # Layer transparency scheduler: alpha_o = beta * M.
+    if alpha_mask is not None and alpha_mask.shape[1] == current.shape[1]:
+        mask = alpha_mask.to(dtype=current.dtype)
+        if mask.shape[0] == 1 and current.shape[0] > 1:
+            mask = mask.expand(current.shape[0], -1, -1)
+        if mask.shape[0] != current.shape[0]:
+            mask = None
+    elif region_mask is not None and region_mask.shape[1] == current.shape[1]:
+        # Fallback to binary region mask when soft alpha is unavailable.
         mask = region_mask.to(dtype=current.dtype)
         if mask.shape[0] == 1 and current.shape[0] > 1:
             mask = mask.expand(current.shape[0], -1, -1)
@@ -715,7 +723,8 @@ def compose_phase2_region_tokens(
         mask = None
 
     if mask is not None:
-        update = current + (float(beta) * mask) * (local_tokens - current)
+        delta = local_tokens - current
+        update = current + (float(beta) * mask) * delta
     else:
         update = current.lerp(local_tokens, float(beta))
     composed = x_tokens.clone()
@@ -1011,6 +1020,17 @@ def run_layerbind_forward(
                 region_injection_scale = 1.0 if region_state.get("is_occluding", False) else 0.60
                 local_tokens = region_tokens.lerp(local_tokens, float(phase2_delta_scale) * region_injection_scale)
                 region_state["branch_tokens"] = local_tokens
+                alpha_mask = zimage_layerbind_utils.estimate_alpha_from_token_difference(
+                    local_tokens,
+                    region_tokens,
+                    region_state["indices"],
+                    token_shape=x_meta["token_shape"],
+                    gamma=gamma,
+                    poisson_lambda=poisson_lambda,
+                    return_binary_mask=False,
+                )
+                alpha_mask = alpha_mask.pow(LAYERBIND_PHASE2_DELTA_ALPHA_POWER)
+                region_state["alpha_mask"] = alpha_mask
                 text_segment_biases = build_layerbind_segment_logit_biases(
                     include_query_in_kv=False,
                     query_length=region_state["text_tokens"].shape[1],
@@ -1035,6 +1055,7 @@ def run_layerbind_forward(
                     region_state["indices"],
                     beta * region_injection_scale,
                     region_mask=region_state.get("region_mask"),
+                    alpha_mask=region_state.get("alpha_mask"),
                 )
             x_tokens = composed_x_tokens
 

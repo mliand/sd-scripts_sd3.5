@@ -455,6 +455,26 @@ def test_phase2_composition_uses_beta_times_binary_mask_once():
     assert abs(composed[0, 1, 0].item() - 0.0) < 1e-6
 
 
+def test_phase2_composition_prefers_soft_alpha_delta_merge():
+    x_tokens = torch.tensor([[[2.0], [2.0]]])
+    local_tokens = torch.tensor([[[10.0], [10.0]]])
+    indices = torch.tensor([0, 1], dtype=torch.long)
+    region_mask = torch.tensor([[[1.0], [1.0]]])
+    alpha_mask = torch.tensor([[[0.25], [0.0]]])
+
+    composed = zimage_minimal_inference.compose_phase2_region_tokens(
+        x_tokens,
+        local_tokens,
+        indices,
+        beta=0.5,
+        region_mask=region_mask,
+        alpha_mask=alpha_mask,
+    )
+
+    assert abs(composed[0, 0, 0].item() - 3.0) < 1e-6
+    assert abs(composed[0, 1, 0].item() - 2.0) < 1e-6
+
+
 def test_phase1_resets_region_text_tokens_from_prompt_each_timestep(monkeypatch):
     transformer = create_tiny_zimage_model()
     device = torch.device("cpu")

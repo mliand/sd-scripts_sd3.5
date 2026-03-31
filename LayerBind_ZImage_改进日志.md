@@ -29,6 +29,28 @@
 ### 2026-03-31 / `pending`
 
 - 背景问题：
+  - 当前图像主体和整体画面已基本正常，但 region 内仍残留灰色/彩色色块噪声。
+  - 这说明问题不只是 mask 粗糙，更可能是 `Phase2` 仍把“混合态 local token”当成前景层整块写回，导致未成形残差持续留在 region 内。
+- 改动点：
+  - `Phase2` 的局部合成从“masked local token writeback”改为“soft-alpha gated delta merge”。
+  - 对每个 region、每个 `Phase2` attention block，使用当前 `local_tokens` 与当前 `region_tokens` 的差异动态估计 soft alpha。
+  - 合成时不再把 `local_tokens` 整块当作前景层贴回，而是只写回：
+    - `delta = local_tokens - current_region_tokens`
+    - `current + beta * alpha * delta`
+  - 新增测试：验证 `Phase2` 会优先使用 soft alpha，并执行 delta merge。
+- 预期收益：
+  - 降低 region 内残留的灰色/彩色色块。
+  - 让局部路径更多承担“补充主体语义增量”的角色，而不是覆盖整个 region 内容。
+- 已知风险：
+  - 若 alpha 过保守，主体强化幅度可能下降。
+  - 若 alpha 估计不稳定，局部细节可能在步间轻微闪动。
+- 验证方式/结果：
+  - 本地执行静态校验。
+  - 单元测试仍受当前环境是否具备 `torch` 限制。
+
+### 2026-03-31 / `pending`
+
+- 背景问题：
   - 在引入 region-local RoPE 后，`Phase2` 局部路径仍残留一次旧变量名引用，导致推理启动后报错：
     - `NameError: name 'region_x_freqs' is not defined`
 - 改动点：
@@ -62,6 +84,13 @@
 - 验证方式/结果：
   - 本地执行静态校验。
   - 单元测试仍受当前环境是否具备 `torch` 限制。
+  - 用户实机反馈：收益显著。
+  - 具体表现：
+    - 女孩主体占比明显扩大
+    - 猫的位置恢复正确
+  - 当前剩余问题：
+    - region 区域内仍残留较多灰色/彩色色块噪声
+    - 图像主体和整体画面已基本正常，说明问题更像是局部 branch/noise 残差没有与背景或主体正确融合，而不是单纯的“主体没铺满”
 
 ### 2026-03-31 / `pending`
 
