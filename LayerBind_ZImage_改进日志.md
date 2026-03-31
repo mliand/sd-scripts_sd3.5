@@ -21,10 +21,32 @@
 
 - 当前分支：`layerbind`
 - 最近一次关键提交：`cc9dc91`
-- 当前工作树：已追加一轮未提交的 `Phase1 text/image co-evolution restore` 修复
+- 当前工作树：已追加一轮未提交的 `t1 bottom masked-direct` 修复
 - 当前主线目标：减少 `region 与 background` 割裂、提升主体对齐。
 
 ## 4. 改进记录
+
+### 2026-03-31 / `pending`
+
+- 背景问题：
+  - 修复 `Phase1` 文本/图像共同演化后，输出仍然是大面积白色色块，不再是纯 noise。
+  - 这说明扩散轨迹已恢复，但 `t1` 融合时把 branch 内部的“白底背景”整块写回了全局。
+  - 对 `Z-Image` 这种共享式 self-attn 来说，论文里的“底层无遮挡 region 直接整块覆盖”不稳定，因为 branch 背景不像双流模型那样天然贴合全局背景。
+- 改动点：
+  - `blend_mode=alpha` 且 `non-occluding` 时，不再执行整块 `direct overwrite`。
+  - 改为 `binary_mask * branch + (1-binary_mask) * current`，即“前景 direct，背景保留 global”。
+  - 保留 occluding 层的 `alpha_f` 软合成不变。
+  - 新增回归测试：当底层 `binary_mask=0` 时，必须完整保留当前 global token。
+- 预期收益：
+  - 消除整块白底/底色色块，恢复 region 外围背景连续性。
+  - 更适配 `Z-Image` 的共享模态结构，避免把 branch 自带背景错误刷回全局。
+- 已知风险：
+  - 这已经明显偏离论文的“底层 full direct”定义，但属于针对 `Z-Image` 结构差异的必要修正。
+  - 若 `binary_mask` 估计过紧，小目标可能会被削弱。
+- 验证方式/结果：
+  - 本地 `python -m py_compile zimage_minimal_inference.py tests/test_zimage_minimal_inference_layerbind.py` 通过。
+  - 新增回归测试：`test_phase1_blend_preserves_global_background_for_bottom_layers_in_alpha_mode`。
+  - `pytest -q tests/test_zimage_minimal_inference_layerbind.py` 仍无法执行，当前环境缺少 `torch`。
 
 ### 2026-03-31 / `pending`
 
