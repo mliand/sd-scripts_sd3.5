@@ -318,6 +318,15 @@ def prepare_region_runtime_states(layout, x_seq_len: int, device: torch.device):
         if indices.numel() > 0:
             keep_mask[indices] = False
         background_indices = all_indices[keep_mask]
+        is_occluding_hint = False
+        for lower_region in layout.regions:
+            if lower_region.layer_index >= region.layer_index:
+                continue
+            x1, y1, x2, y2 = region.bbox
+            lx1, ly1, lx2, ly2 = lower_region.bbox
+            if max(x1, lx1) < min(x2, lx2) and max(y1, ly1) < min(y2, ly2):
+                is_occluding_hint = True
+                break
         foreign_region_mask = all_region_mask.clone()
         if indices.numel() > 0:
             foreign_region_mask[indices] = False
@@ -331,6 +340,7 @@ def prepare_region_runtime_states(layout, x_seq_len: int, device: torch.device):
                 "indices": indices,
                 "background_indices": background_indices,
                 "foreign_region_indices": foreign_region_indices,
+                "is_occluding_hint": is_occluding_hint,
                 "branch_patches": None,
                 "branch_tokens": None,
                 "text_tokens": None,
@@ -640,6 +650,7 @@ def blend_region_tokens(
             continue
 
         current = blended.index_select(1, indices)
+        is_occluding = bool(region_state.get("is_occluding_hint", False)) or is_occluding
         region_state["is_occluding"] = is_occluding
         if blend_mode == "direct" or not is_occluding:
             if blend_mode == "direct":

@@ -49,7 +49,7 @@ def test_populate_region_token_indices_preserves_layer_order():
     assert populated.regions[1].token_indices == [1]
 
 
-def test_populate_region_token_indices_preserves_overlap_for_compositing():
+def test_populate_region_token_indices_assigns_overlap_to_higher_layer():
     layout = LayerBindLayout(
         scene_prompt="scene",
         regions=[
@@ -61,7 +61,7 @@ def test_populate_region_token_indices_preserves_overlap_for_compositing():
     populated = populate_region_token_indices(layout, image_width=1024, image_height=1024)
 
     assert [region.layer_index for region in populated.regions] == [1, 2]
-    assert populated.regions[0].token_indices == [0, 1]
+    assert populated.regions[0].token_indices == [0]
     assert populated.regions[1].token_indices == [1, 2]
 
 
