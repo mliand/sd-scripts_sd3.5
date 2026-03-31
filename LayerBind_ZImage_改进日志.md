@@ -21,9 +21,29 @@
 
 - 当前分支：`layerbind`
 - 最近一次关键提交：`141e3d6`
+- 当前工作树：已追加一轮未提交的 `Phase2 timestep re-seed` 修复
 - 当前主线目标：减少 `region 与 background` 割裂、提升主体对齐。
 
 ## 4. 改进记录
+
+### 2026-03-31 / `pending`
+
+- 背景问题：
+  - 新一轮 `Phase2` 路由收紧后，region 位置正确但推理结束仍保留纯 noise，背景也退化为大面积单色。
+  - 根因是 `Phase2` 的局部轨迹被错误地跨 `timestep` 持久化，旧时间步 token 被带入新时间步，破坏了扩散 ODE 轨迹。
+- 改动点：
+  - `Phase2` 在每个 denoising timestep 开始时，重新从当前 `global_x_tokens[idx]` 初始化 `phase2_tokens`。
+  - `Phase2` 只在“当前 timestep 的层内”沿用局部轨迹，不再复用上一 timestep 的 region token 状态。
+  - 新增回归测试，约束 `Phase2` 必须每个 timestep 从当前全局 region token 重新起步。
+- 预期收益：
+  - 恢复 region 局部路径的正常去噪能力，避免“位置对但内容始终是 noise”。
+  - 保留同一 timestep 内的局部语义强化，不再破坏时间步一致性。
+- 已知风险：
+  - 即使修掉跨 timestep 复用，`Z-Image` 共享 self-attn 下的跨 region 语义竞争仍可能存在，需要继续看人物 region 是否恢复。
+- 验证方式/结果：
+  - 本地 `python -m py_compile zimage_minimal_inference.py tests/test_zimage_minimal_inference_layerbind.py` 通过。
+  - 新增回归测试：`test_phase2_reseeds_from_current_global_tokens_each_timestep`。
+  - `pytest -q tests/test_zimage_minimal_inference_layerbind.py` 仍无法执行，当前环境缺少 `torch`。
 
 ### 2026-03-31 / `141e3d6`
 

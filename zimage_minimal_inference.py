@@ -847,6 +847,28 @@ def run_layerbind_forward(
             )
             if region_state["text_tokens"] is None:
                 region_state["text_tokens"] = region_condition["tokens"].clone()
+    elif phase == "phase2":
+        for region_state, region_condition in zip(region_states, region_conditions):
+            if region_state["indices"].numel() == 0:
+                continue
+            region_x_freqs = create_image_freqs_for_caption_length(
+                transformer,
+                x_meta["token_shape"],
+                cap_seq_len=region_condition["tokens"].shape[1],
+                batch_size=x_tokens.shape[0],
+                device=x_tokens.device,
+            )
+            region_tokens, _ = transformer.select_token_subset(
+                x_tokens,
+                region_state["indices"],
+                region_x_freqs,
+            )
+            # Phase 2 should keep a per-layer local trajectory, but must re-seed from the
+            # current global latent at every denoising timestep to stay on the ODE path.
+            region_state["phase2_tokens"] = region_tokens.clone()
+            region_state["phase2_step_index"] = int(step_index)
+            if region_state["text_tokens"] is None:
+                region_state["text_tokens"] = region_condition["tokens"].clone()
 
     for layer_idx, layer in enumerate(transformer.layers):
         unified, _ = transformer.build_unified_tokens(x_tokens, x_freqs_cis, cap_tokens_current, cap_freqs_current)
@@ -961,10 +983,16 @@ def run_layerbind_forward(
                 region_tokens, region_freqs = transformer.select_token_subset(
                     global_x_tokens, region_state["indices"], region_x_freqs
                 )
-                region_query_tokens = region_state.get("branch_tokens")
-                if region_query_tokens is None or region_query_tokens.shape != region_tokens.shape:
-                    # Keep Phase 2 on the region branch trajectory instead of re-seeding from the current global region each layer.
+                region_query_tokens = region_state.get("phase2_tokens")
+                if (
+                    region_query_tokens is None
+                    or region_query_tokens.shape != region_tokens.shape
+                    or int(region_state.get("phase2_step_index", -1)) != int(step_index)
+                ):
+                    # Safety fallback: Phase 2 keeps an intra-step local trajectory, but must
+                    # never reuse tokens from a previous denoising timestep.
                     region_query_tokens = region_tokens.clone()
+                    region_state["phase2_step_index"] = int(step_index)
                 else:
                     region_query_tokens = region_query_tokens.to(device=region_tokens.device, dtype=region_tokens.dtype)
                 local_context_indices = region_state.get("context_indices", region_state["background_indices"])
@@ -997,7 +1025,7 @@ def run_layerbind_forward(
                 )
                 region_injection_scale = 1.0 if region_state.get("is_occluding", False) else 0.60
                 local_tokens = region_query_tokens.lerp(local_tokens, float(phase2_delta_scale) * region_injection_scale)
-                region_state["branch_tokens"] = local_tokens
+                region_state["phase2_tokens"] = local_tokens
                 composed_x_tokens = compose_phase2_region_tokens(
                     composed_x_tokens,
                     local_tokens,

@@ -447,3 +447,103 @@ def test_phase2_keeps_region_branch_trajectory_and_freezes_text_tokens(monkeypat
     assert torch.allclose(captured_queries[0], phase2_branch_seed)
     assert not torch.allclose(captured_queries[0], global_region_before)
     assert torch.allclose(region_states[0]["text_tokens"], frozen_text_tokens)
+
+
+def test_phase2_reseeds_from_current_global_tokens_each_timestep(monkeypatch):
+    transformer = create_tiny_zimage_model()
+    device = torch.device("cpu")
+    cap_mask = torch.tensor([[True, True, True]], device=device)
+    cap_feats = torch.randn(1, 3, 12, device=device)
+    scene_tokens, scene_freqs = transformer.prepare_caption_tokens(cap_feats, cap_mask, apply_context_refiner=False)
+    region_tokens, region_freqs = transformer.prepare_caption_tokens(cap_feats, cap_mask, apply_context_refiner=False)
+
+    scene_condition = {"tokens": scene_tokens.clone(), "mask": cap_mask, "freqs": scene_freqs}
+    background_condition = {"tokens": scene_tokens.clone(), "mask": cap_mask, "freqs": scene_freqs}
+    region_conditions = [{"tokens": region_tokens.clone(), "freqs": region_freqs}]
+    region_states = [
+        {
+            "layer_index": 1,
+            "bbox": (0, 0, 16, 16),
+            "prompt": "object",
+            "indices": torch.tensor([0], device=device),
+            "background_indices": torch.tensor([1, 2, 3], device=device),
+            "foreign_region_indices": torch.zeros((0,), dtype=torch.long, device=device),
+            "is_occluding_hint": False,
+            "branch_patches": None,
+            "branch_tokens": None,
+            "text_tokens": region_tokens.clone(),
+            "region_mask": torch.ones((1, 1, 1), device=device),
+            "alpha_mask": None,
+        }
+    ]
+
+    captured_queries = []
+
+    def fake_contextual_forward(
+        self,
+        query_states,
+        query_freqs_cis,
+        context_states=None,
+        context_freqs_cis=None,
+        adaln_input=None,
+        attn_params=None,
+        include_query_in_kv=True,
+        segment_logit_biases=None,
+    ):
+        captured_queries.append(query_states.detach().clone())
+        return query_states + 1.0
+
+    for layer in transformer.layers:
+        monkeypatch.setattr(layer, "contextual_forward", types.MethodType(fake_contextual_forward, layer))
+
+    sigmas = torch.tensor([1.0, 0.5, 0.0], device=device)
+    latent_a = torch.randn(1, 16, 1, 4, 4, device=device)
+    expected_a = transformer.patchify(latent_a, 2, 1).index_select(1, region_states[0]["indices"])
+    zimage_minimal_inference.run_layerbind_forward(
+        transformer,
+        latent_a,
+        torch.tensor([0.5], device=device),
+        sigmas,
+        0,
+        scene_condition,
+        background_condition,
+        region_conditions,
+        region_states,
+        phase="phase2",
+        hard_binding_layers=[0],
+        beta=0.7,
+        blend_mode="alpha",
+        gamma=0.9,
+        poisson_lambda=0.5,
+        phase2_delta_scale=0.5,
+        apply_phase1_blend=False,
+    )
+
+    first_call_first_query = captured_queries[0].clone()
+    assert torch.allclose(first_call_first_query, expected_a)
+
+    captured_queries.clear()
+    latent_b = torch.randn(1, 16, 1, 4, 4, device=device)
+    expected_b = transformer.patchify(latent_b, 2, 1).index_select(1, region_states[0]["indices"])
+    zimage_minimal_inference.run_layerbind_forward(
+        transformer,
+        latent_b,
+        torch.tensor([0.25], device=device),
+        sigmas,
+        1,
+        scene_condition,
+        background_condition,
+        region_conditions,
+        region_states,
+        phase="phase2",
+        hard_binding_layers=[0],
+        beta=0.7,
+        blend_mode="alpha",
+        gamma=0.9,
+        poisson_lambda=0.5,
+        phase2_delta_scale=0.5,
+        apply_phase1_blend=False,
+    )
+
+    assert torch.allclose(captured_queries[0], expected_b)
+    assert not torch.allclose(captured_queries[0], first_call_first_query)
