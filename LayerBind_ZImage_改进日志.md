@@ -29,6 +29,24 @@
 ### 2026-03-31 / `pending`
 
 - 背景问题：
+  - 当前稳定基线 + `Phase2` bias 增强后，主体收益明显，但示例 layout 中 region prompt 仍带 `white background`，会继续把局部背景语义压回 region 条件里。
+- 改动点：
+  - 示例配置 [examples/layerbind_layout_example.json](/home/coco/workspace/sd-scripts_sd3.5/examples/layerbind_layout_example.json) 的 region prompt 改为纯主体描述：
+    - `only an apple tree`
+    - `only a girl`
+    - `only a cat`
+  - 白底语义仅保留在 `background_prompt / scene_prompt`。
+- 预期收益：
+  - 让 region 条件更聚焦主体特征，减少局部背景语义稀释。
+  - 与当前 `Phase2 text bias` 增强形成一致策略。
+- 已知风险：
+  - 这只影响示例 layout，不改变主算法逻辑；若用户自定义 layout 仍保留背景词，问题仍可能复现。
+- 验证方式/结果：
+  - 配置改动，无需额外代码校验。
+
+### 2026-03-31 / `pending`
+
+- 背景问题：
   - 回退到稳定基线后，图像已经能正常生成，但 region 主体强度偏弱，不如此前一些失败实验里“noise 形成阶段”的主体感强。
   - 说明当前主问题不是路径崩坏，而是 `Phase2` 局部更新时 region text 对局部图像 token 的牵引力仍然偏弱。
 - 改动点：
