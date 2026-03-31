@@ -29,6 +29,26 @@
 ### 2026-03-31 / `pending`
 
 - 背景问题：
+  - 当前双主体示例里，女孩只占 region 上方很小一部分，猫也容易偏出 region。
+  - 主要原因不是新算法问题，而是示例 prompt 本身存在构图冲突：
+    - `close shot` 与 `full body` 同时出现
+    - 没有明确要求主体“占据 region 大部分”
+- 改动点：
+  - 示例 `scene_prompt` 改为强调主体占据画面大部分。
+  - 女孩 `region_prompt` 改为 `upper body to knee-up view`，去掉 `full body`。
+  - 女孩和猫的 `region_prompt` 都增加 `centered in the region`、`occupying most of the region`。
+  - 轻微调整女孩和猫的 bbox 以匹配近景构图。
+- 预期收益：
+  - 提升主体在各自 region 内的占比。
+  - 减少“位置对但主体缩在一角”的示例配置误导。
+- 已知风险：
+  - 这是示例 prompt/bbox 修正，不改变主算法逻辑；若用户自定义 prompt 仍存在近景/全身冲突，问题仍会复现。
+- 验证方式/结果：
+  - 配置改动，无需额外代码校验。
+
+### 2026-03-31 / `pending`
+
+- 背景问题：
   - 当前示例仍包含苹果树，用户希望简化为“女孩 + 猫”双主体场景，并补充 `close shot` 相关描述，以更集中观察主体占比和 region 约束效果。
 - 改动点：
   - 示例配置改为仅保留两个 region：
