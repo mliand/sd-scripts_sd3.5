@@ -29,6 +29,27 @@
 ### 2026-03-31 / `pending`
 
 - 背景问题：
+  - 在 `Phase2 delta alpha merge` 后，region 内色块与背景/主体的融合更自然，但灰色/彩色色块数量没有明显减少。
+  - 这说明问题已不主要在 compositing，而更在 `Phase2 local token` 本身仍带有较强脏残差。
+- 改动点：
+  - 在 `Phase2` 中新增 `alpha-guided residual suppression`：
+    - 先根据当前层动态估计的 `alpha_mask` 压低低置信区域残差
+    - 再对异常大的 residual norm 做裁剪
+  - 目标是在 local token 写回前，就把“彩色色块来源”的大残差压回去。
+  - 新增测试：验证 suppression 会保留高 alpha 区域的增量，同时把低 alpha 区域回退到 region/global 基线。
+- 预期收益：
+  - 直接减少 region 内彩色色块噪声的源头。
+  - 保留主体强化，同时降低非主体 token 的异常激活。
+- 已知风险：
+  - 若 suppression 过强，主体细节也可能被一并削弱。
+  - 该策略依赖当前 alpha 估计质量，若 alpha 偏差较大，抑制范围也会偏差。
+- 验证方式/结果：
+  - 本地执行静态校验。
+  - 单元测试仍受当前环境是否具备 `torch` 限制。
+
+### 2026-03-31 / `pending`
+
+- 背景问题：
   - 当前图像主体和整体画面已基本正常，但 region 内仍残留灰色/彩色色块噪声。
   - 这说明问题不只是 mask 粗糙，更可能是 `Phase2` 仍把“混合态 local token”当成前景层整块写回，导致未成形残差持续留在 region 内。
 - 改动点：

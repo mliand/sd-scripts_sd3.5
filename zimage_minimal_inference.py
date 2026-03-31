@@ -25,6 +25,7 @@ init_ipex()
 
 LAYERBIND_PHASE2_TEXT_UPDATE_SCALE = 0.35
 LAYERBIND_PHASE2_DELTA_ALPHA_POWER = 1.5
+LAYERBIND_PHASE2_RESIDUAL_CLIP_MULTIPLIER = 2.5
 
 
 def parse_layer_spec(text: str):
@@ -732,6 +733,32 @@ def compose_phase2_region_tokens(
     return composed
 
 
+def suppress_phase2_local_residual(
+    region_tokens: torch.Tensor,
+    local_tokens: torch.Tensor,
+    alpha_mask: torch.Tensor,
+):
+    if local_tokens.shape != region_tokens.shape:
+        raise ValueError(f"local/region token shapes must match, got {tuple(local_tokens.shape)} vs {tuple(region_tokens.shape)}")
+
+    alpha = alpha_mask.to(dtype=local_tokens.dtype, device=local_tokens.device)
+    if alpha.shape[0] == 1 and local_tokens.shape[0] > 1:
+        alpha = alpha.expand(local_tokens.shape[0], -1, -1)
+
+    residual = local_tokens - region_tokens
+    gated_residual = residual * alpha
+
+    residual_norm = torch.linalg.vector_norm(gated_residual, dim=-1, keepdim=True)
+    valid_norms = residual_norm[alpha > 1e-4]
+    if valid_norms.numel() > 0:
+        clip_threshold = torch.quantile(valid_norms.to(dtype=torch.float32), 0.75).to(dtype=local_tokens.dtype)
+        clip_threshold = clip_threshold * LAYERBIND_PHASE2_RESIDUAL_CLIP_MULTIPLIER
+        scale = torch.clamp(clip_threshold / residual_norm.clamp(min=1e-6), max=1.0)
+        gated_residual = gated_residual * scale
+
+    return region_tokens + gated_residual
+
+
 def save_debug_image(vae, latents: torch.Tensor, file_path: str):
     latents = latents.to(vae.dtype)
     latents = zimage_train_utils._unscale_latents(latents, vae)
@@ -1030,6 +1057,7 @@ def run_layerbind_forward(
                     return_binary_mask=False,
                 )
                 alpha_mask = alpha_mask.pow(LAYERBIND_PHASE2_DELTA_ALPHA_POWER)
+                local_tokens = suppress_phase2_local_residual(region_tokens, local_tokens, alpha_mask)
                 region_state["alpha_mask"] = alpha_mask
                 text_segment_biases = build_layerbind_segment_logit_biases(
                     include_query_in_kv=False,
