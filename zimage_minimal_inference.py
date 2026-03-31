@@ -433,16 +433,12 @@ def build_layerbind_segment_logit_biases(
         bias = -math.log(max(int(length), 1))
         if role == "text":
             bias += 1.0
-        elif role == "text_anchor":
-            bias += 1.6
         elif role == "scene_text":
             bias += 0.2
         elif role == "branch":
             bias += 0.2
         elif role == "local_global":
             bias += 0.0
-        elif role == "local_global_sparse":
-            bias -= 0.35
         biases.append(bias)
 
     return biases
@@ -659,8 +655,6 @@ def blend_region_tokens(
         if blend_mode == "direct" or not is_occluding:
             if blend_mode == "direct":
                 region_state["region_mask"] = torch.ones_like(branch_tokens[:, :, :1])
-                update = branch_tokens
-                region_state["alpha_mask"] = None
             else:
                 _alpha_mask, binary_mask = zimage_layerbind_utils.estimate_alpha_from_token_difference(
                     branch_tokens,
@@ -672,10 +666,8 @@ def blend_region_tokens(
                     return_binary_mask=True,
                 )
                 region_state["region_mask"] = binary_mask
-                # Z-Image shared self-attn does not preserve branch background as well as the
-                # paper's dual-stream backbone, so keep global background even for bottom layers.
-                update = binary_mask * branch_tokens + (1.0 - binary_mask) * current
-                region_state["alpha_mask"] = None
+            update = branch_tokens
+            region_state["alpha_mask"] = None
         else:
             alpha_mask, binary_mask = zimage_layerbind_utils.estimate_alpha_from_token_difference(
                 branch_tokens,
@@ -788,11 +780,7 @@ def run_layerbind_forward(
     apply_phase1_blend: bool,
     layer_stats_accumulator: Optional[dict[str, Any]] = None,
 ):
-    # Paper uses T_bg in Phase 1, but Z-Image's shared self-attention collapses too easily to
-    # background-only semantics if the global path is driven purely by the background prompt.
-    # Use scene text as the main global condition in both phases, and let region masking/branch
-    # logic control where object semantics land.
-    active_condition = scene_condition
+    active_condition = background_condition if phase == "phase1" else scene_condition
     cap_tokens = active_condition["tokens"]
     cap_mask = active_condition["mask"]
     cap_freqs = active_condition["freqs"]
@@ -853,31 +841,8 @@ def run_layerbind_forward(
                 patch_size=x_meta["patch_size"],
                 f_patch_size=x_meta["f_patch_size"],
             )
-            # Reset region text every denoising timestep, then allow Phase 1 to co-evolve it
-            # within the current timestep only. This matches fixed prompt conditioning better
-            # than carrying a mutated text state across timesteps.
-            region_state["text_tokens"] = region_condition["tokens"].clone()
-    elif phase == "phase2":
-        for region_state, region_condition in zip(region_states, region_conditions):
-            if region_state["indices"].numel() == 0:
-                continue
-            region_x_freqs = create_image_freqs_for_caption_length(
-                transformer,
-                x_meta["token_shape"],
-                cap_seq_len=region_condition["tokens"].shape[1],
-                batch_size=x_tokens.shape[0],
-                device=x_tokens.device,
-            )
-            region_tokens, _ = transformer.select_token_subset(
-                x_tokens,
-                region_state["indices"],
-                region_x_freqs,
-            )
-            # Phase 2 should keep a per-layer local trajectory, but must re-seed from the
-            # current global latent at every denoising timestep to stay on the ODE path.
-            region_state["phase2_tokens"] = region_tokens.clone()
-            region_state["phase2_step_index"] = int(step_index)
-            region_state["text_tokens"] = region_condition["tokens"].clone()
+            if region_state["text_tokens"] is None:
+                region_state["text_tokens"] = region_condition["tokens"].clone()
 
     for layer_idx, layer in enumerate(transformer.layers):
         unified, _ = transformer.build_unified_tokens(x_tokens, x_freqs_cis, cap_tokens_current, cap_freqs_current)
@@ -922,14 +887,14 @@ def run_layerbind_forward(
                     branch_segment_biases = build_layerbind_segment_logit_biases(
                         include_query_in_kv=True,
                         query_length=region_state["branch_tokens"].shape[1],
-                        context_lengths=[region_state["text_tokens"].shape[1], scene_condition["tokens"].shape[1]],
-                        context_roles=["text", "scene_text"],
+                        context_lengths=[region_state["text_tokens"].shape[1]],
+                        context_roles=["text"],
                     )
                     region_state["branch_tokens"] = layer.contextual_forward(
                         region_state["branch_tokens"],
                         branch_freqs,
-                        context_states=[region_state["text_tokens"], scene_condition["tokens"]],
-                        context_freqs_cis=[region_condition["freqs"], scene_condition["freqs"]],
+                        context_states=[region_state["text_tokens"]],
+                        context_freqs_cis=[region_condition["freqs"]],
                         adaln_input=adaln_input,
                         include_query_in_kv=True,
                         segment_logit_biases=branch_segment_biases,
@@ -962,18 +927,14 @@ def run_layerbind_forward(
                     branch_segment_biases = build_layerbind_segment_logit_biases(
                         include_query_in_kv=False,
                         query_length=region_state["branch_tokens"].shape[1],
-                        context_lengths=[
-                            background_tokens.shape[1],
-                            region_state["text_tokens"].shape[1],
-                            scene_condition["tokens"].shape[1],
-                        ],
-                        context_roles=["local_global", "text", "scene_text"],
+                        context_lengths=[background_tokens.shape[1], region_state["text_tokens"].shape[1]],
+                        context_roles=["local_global", "text"],
                     )
                     region_state["branch_tokens"] = layer.contextual_forward(
                         region_state["branch_tokens"],
                         branch_freqs,
-                        context_states=[background_tokens, region_state["text_tokens"], scene_condition["tokens"]],
-                        context_freqs_cis=[background_freqs, region_condition["freqs"], scene_condition["freqs"]],
+                        context_states=[background_tokens, region_state["text_tokens"]],
+                        context_freqs_cis=[background_freqs, region_condition["freqs"]],
                         adaln_input=adaln_input,
                         include_query_in_kv=False,
                         segment_logit_biases=branch_segment_biases,
@@ -983,18 +944,14 @@ def run_layerbind_forward(
                 text_segment_biases = build_layerbind_segment_logit_biases(
                     include_query_in_kv=text_include_query,
                     query_length=region_state["text_tokens"].shape[1],
-                    context_lengths=[
-                        region_state["branch_tokens"].shape[1],
-                        local_background_tokens.shape[1],
-                        scene_condition["tokens"].shape[1],
-                    ],
-                    context_roles=["branch", "local_global", "scene_text"],
+                    context_lengths=[region_state["branch_tokens"].shape[1], local_background_tokens.shape[1]],
+                    context_roles=["branch", "local_global"],
                 )
                 region_state["text_tokens"] = layer.contextual_forward(
                     region_state["text_tokens"],
                     region_condition["freqs"],
-                    context_states=[region_state["branch_tokens"], local_background_tokens, scene_condition["tokens"]],
-                    context_freqs_cis=[branch_freqs, local_background_freqs, scene_condition["freqs"]],
+                    context_states=[region_state["branch_tokens"], local_background_tokens],
+                    context_freqs_cis=[branch_freqs, local_background_freqs],
                     adaln_input=adaln_input,
                     include_query_in_kv=text_include_query,
                     segment_logit_biases=text_segment_biases,
@@ -1016,22 +973,9 @@ def run_layerbind_forward(
                 region_tokens, region_freqs = transformer.select_token_subset(
                     global_x_tokens, region_state["indices"], region_x_freqs
                 )
-                region_query_tokens = region_state.get("phase2_tokens")
-                if (
-                    region_query_tokens is None
-                    or region_query_tokens.shape != region_tokens.shape
-                    or int(region_state.get("phase2_step_index", -1)) != int(step_index)
-                ):
-                    # Safety fallback: Phase 2 keeps an intra-step local trajectory, but must
-                    # never reuse tokens from a previous denoising timestep.
-                    region_query_tokens = region_tokens.clone()
-                    region_state["phase2_step_index"] = int(step_index)
-                else:
-                    region_query_tokens = region_query_tokens.to(device=region_tokens.device, dtype=region_tokens.dtype)
                 local_context_indices = region_state.get("context_indices", region_state["background_indices"])
-                context_source_tokens = composed_x_tokens
                 local_global_tokens, local_global_freqs = transformer.select_token_subset(
-                    context_source_tokens,
+                    global_x_tokens,
                     local_context_indices,
                     region_x_freqs,
                 )
@@ -1040,15 +984,15 @@ def run_layerbind_forward(
                 include_query_in_kv = layer_idx in hard_binding_layers
                 local_segment_biases = build_layerbind_segment_logit_biases(
                     include_query_in_kv=include_query_in_kv,
-                    query_length=region_query_tokens.shape[1],
+                    query_length=region_tokens.shape[1],
                     context_lengths=[
                         region_state["text_tokens"].shape[1],
                         local_global_tokens.shape[1],
                     ],
-                    context_roles=["text_anchor", "local_global_sparse"],
+                    context_roles=["text", "local_global"],
                 )
                 local_tokens = layer.contextual_forward(
-                    region_query_tokens,
+                    region_tokens,
                     region_freqs,
                     context_states=[region_state["text_tokens"], local_global_tokens],
                     context_freqs_cis=[region_condition["freqs"], local_global_freqs],
@@ -1057,8 +1001,24 @@ def run_layerbind_forward(
                     segment_logit_biases=local_segment_biases,
                 )
                 region_injection_scale = 1.0 if region_state.get("is_occluding", False) else 0.60
-                local_tokens = region_query_tokens.lerp(local_tokens, float(phase2_delta_scale) * region_injection_scale)
-                region_state["phase2_tokens"] = local_tokens
+                local_tokens = region_tokens.lerp(local_tokens, float(phase2_delta_scale) * region_injection_scale)
+                text_include_query = False
+                text_segment_biases = build_layerbind_segment_logit_biases(
+                    include_query_in_kv=text_include_query,
+                    query_length=region_state["text_tokens"].shape[1],
+                    context_lengths=[local_tokens.shape[1]],
+                    context_roles=["branch"],
+                )
+                region_state["text_tokens"] = layer.contextual_forward(
+                    region_state["text_tokens"],
+                    region_condition["freqs"],
+                    context_states=[local_tokens],
+                    context_freqs_cis=[region_freqs],
+                    adaln_input=adaln_input,
+                    include_query_in_kv=text_include_query,
+                    segment_logit_biases=text_segment_biases,
+                )
+                region_state["branch_tokens"] = local_tokens
                 composed_x_tokens = compose_phase2_region_tokens(
                     composed_x_tokens,
                     local_tokens,

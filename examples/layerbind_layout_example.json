@@ -11,17 +11,17 @@
   },
   "regions": [
     {
-      "region_prompt": "only an apple tree",
+      "region_prompt": "only an apple tree, white background",
       "bbox": [60, 180, 380, 940],
       "layer_index": 1
     },
     {
-      "region_prompt": "only a girl",
+      "region_prompt": "only a girl, white background",
       "bbox": [360, 180, 700, 940],
       "layer_index": 2
     },
     {
-      "region_prompt": "only a cat",
+      "region_prompt": "only a cat, white background",
       "bbox": [700, 420, 940, 860],
       "layer_index": 3
     }
