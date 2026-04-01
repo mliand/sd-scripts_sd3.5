@@ -27,6 +27,8 @@ LAYERBIND_PHASE2_TEXT_UPDATE_SCALE = 0.35
 LAYERBIND_PHASE2_DELTA_ALPHA_POWER = 1.5
 LAYERBIND_PHASE2_QUERY_ALPHA_THRESHOLD = 0.35
 LAYERBIND_PHASE2_QUERY_MIN_FRACTION = 0.15
+LAYERBIND_PHASE2_SELF_REGION_ATTN_BIAS = 0.35
+LAYERBIND_PHASE2_FOREIGN_REGION_ATTN_PENALTY = -1.25
 LAYERBIND_PHASE1_REVERSE_ADAPTATION_SCALE = 0.20
 LAYERBIND_PHASE1_REVERSE_ADAPTATION_RADIUS = 2
 
@@ -452,6 +454,29 @@ def build_layerbind_segment_logit_biases(
         biases.append(bias)
 
     return biases
+
+
+def build_layerbind_phase2_token_logit_bias(
+    region_indices: torch.Tensor,
+    foreign_region_indices: Optional[torch.Tensor],
+    query_length: int,
+    text_length: int,
+    image_seq_len: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    token_bias = torch.zeros((1, 1, query_length, text_length + image_seq_len), device=device, dtype=dtype)
+    image_bias = token_bias[..., text_length:]
+
+    if region_indices.numel() > 0:
+        image_bias[..., region_indices.to(device=device, dtype=torch.long)] = float(LAYERBIND_PHASE2_SELF_REGION_ATTN_BIAS)
+
+    if foreign_region_indices is not None and foreign_region_indices.numel() > 0:
+        image_bias[..., foreign_region_indices.to(device=device, dtype=torch.long)] = float(
+            LAYERBIND_PHASE2_FOREIGN_REGION_ATTN_PENALTY
+        )
+
+    return token_bias
 
 
 def create_image_freqs_for_caption_length(
@@ -1189,6 +1214,15 @@ def run_layerbind_forward(
                     ],
                     context_roles=["text_anchor", "local_global"],
                 )
+                local_token_logit_bias = build_layerbind_phase2_token_logit_bias(
+                    region_state["indices"],
+                    region_state.get("foreign_region_indices"),
+                    query_length=query_tokens.shape[1],
+                    text_length=region_state["text_tokens"].shape[1],
+                    image_seq_len=global_x_tokens.shape[1],
+                    device=query_tokens.device,
+                    dtype=query_tokens.dtype,
+                )
                 updated_query_tokens = layer.contextual_forward(
                     query_tokens,
                     query_freqs,
@@ -1197,6 +1231,7 @@ def run_layerbind_forward(
                     adaln_input=adaln_input,
                     include_query_in_kv=include_query_in_kv,
                     segment_logit_biases=local_segment_biases,
+                    token_logit_bias=local_token_logit_bias,
                 )
                 region_injection_scale = 1.0 if region_state.get("is_occluding", False) else 0.60
                 updated_query_tokens = query_tokens.lerp(

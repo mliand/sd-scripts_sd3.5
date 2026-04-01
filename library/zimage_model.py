@@ -361,6 +361,7 @@ class ZImageAttention(nn.Module):
         attn_params: Optional[AttentionParams] = None,
         include_query_in_kv: bool = True,
         segment_logit_biases: Optional[Sequence[float]] = None,
+        token_logit_bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         context_list = self._normalize_context_states(context_states)
         context_freqs_list = self._normalize_context_freqs(context_freqs_cis, len(context_list))
@@ -380,19 +381,38 @@ class ZImageAttention(nn.Module):
         query, gate_score, dtype = self._project_query(query_states, query_freqs_cis)
         key, value = self._project_key_value(kv_states, kv_freqs_cis, dtype=dtype)
         effective_attn_params = attn_params
-        if segment_logit_biases is not None:
-            if len(segment_logit_biases) != len(segment_lengths):
-                raise ValueError(f"Expected {len(segment_lengths)} segment biases, got {len(segment_logit_biases)}")
+        token_bias = None
+        if segment_logit_biases is not None or token_logit_bias is not None:
             token_bias = torch.zeros(
                 (query.shape[0], 1, query.shape[1], key.shape[1]),
                 device=query.device,
                 dtype=query.dtype,
             )
-            cursor = 0
-            for length, bias in zip(segment_lengths, segment_logit_biases):
-                if length > 0 and float(bias) != 0.0:
-                    token_bias[:, :, :, cursor : cursor + length] = float(bias)
-                cursor += length
+            if segment_logit_biases is not None:
+                if len(segment_logit_biases) != len(segment_lengths):
+                    raise ValueError(f"Expected {len(segment_lengths)} segment biases, got {len(segment_logit_biases)}")
+                cursor = 0
+                for length, bias in zip(segment_lengths, segment_logit_biases):
+                    if length > 0 and float(bias) != 0.0:
+                        token_bias[:, :, :, cursor : cursor + length] = float(bias)
+                    cursor += length
+
+            if token_logit_bias is not None:
+                if token_logit_bias.ndim != 4:
+                    raise ValueError(f"token_logit_bias must be 4D, got {tuple(token_logit_bias.shape)}")
+                custom_bias = token_logit_bias.to(device=query.device, dtype=query.dtype)
+                if custom_bias.shape[-2:] != (query.shape[1], key.shape[1]):
+                    raise ValueError(
+                        "token_logit_bias shape mismatch: "
+                        f"expected (*, *, {query.shape[1]}, {key.shape[1]}), got {tuple(custom_bias.shape)}"
+                    )
+                if custom_bias.shape[0] == 1 and query.shape[0] > 1:
+                    custom_bias = custom_bias.expand(query.shape[0], -1, -1, -1)
+                if custom_bias.shape[0] != query.shape[0]:
+                    raise ValueError(
+                        f"token_logit_bias batch mismatch: expected {query.shape[0]}, got {custom_bias.shape[0]}"
+                    )
+                token_bias = token_bias + custom_bias
 
             effective_attn_params = AttentionParams.create_attention_params("torch", False)
             if attn_params is not None and attn_params.attention_mask is not None:
@@ -662,6 +682,7 @@ class ZImageTransformerBlock(nn.Module):
         attn_params: Optional[AttentionParams] = None,
         include_query_in_kv: bool = True,
         segment_logit_biases: Optional[Sequence[float]] = None,
+        token_logit_bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         context_list = self._normalize_context_states(context_states)
         context_freqs_list = self._normalize_context_freqs(context_freqs_cis, len(context_list))
@@ -678,6 +699,7 @@ class ZImageTransformerBlock(nn.Module):
                 attn_params=attn_params,
                 include_query_in_kv=include_query_in_kv,
                 segment_logit_biases=segment_logit_biases,
+                token_logit_bias=token_logit_bias,
             )
             return self._apply_attention_and_ffn(query_states, attn_out)
 
@@ -692,6 +714,7 @@ class ZImageTransformerBlock(nn.Module):
             attn_params=attn_params,
             include_query_in_kv=include_query_in_kv,
             segment_logit_biases=segment_logit_biases,
+            token_logit_bias=token_logit_bias,
         )
         return self._apply_attention_and_ffn(query_states, attn_out, scale_mlp=scale_mlp, gate_msa=gate_msa, gate_mlp=gate_mlp)
 

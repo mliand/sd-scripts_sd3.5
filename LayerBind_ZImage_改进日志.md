@@ -29,6 +29,29 @@
 ### 2026-04-01 / `pending`
 
 - 背景问题：
+  - 在将示例 layout 改为完全不重叠后，region 对不齐和跨 region 污染仍然存在，说明主问题不只是 bbox 叠加，而更偏向 attention 机制本身。
+  - 进一步检查当前实现可见：`Phase2` 虽然有 `segment_logit_biases`，但它只能对整段 `text / global image` 做统一偏置，无法区分 `global_x_tokens` 内部哪些 token 属于当前 region、哪些属于 foreign region、哪些只是纯背景。
+  - 对 Z-Image 的 unified self-attention 而言，这个粒度过粗，当前 region query 很容易直接吸收 foreign region object token，导致位置偏移和语义串扰。
+- 改动点：
+  - 在 `library/zimage_model.py` 的 `contextual_forward` 中新增 `token_logit_bias` 支持，使 LayerBind 可以对 attention logits 做 token 级偏置，而不仅是 segment 级偏置。
+  - `Phase2 local path` 保持 `text + full global image` 的上下文结构不变，但新增 soft ownership bias：
+    - 对当前 region 对应的 image tokens 加轻微正偏置
+    - 对其他 foreign-region image tokens 加负偏置
+    - 纯背景 token 不做硬屏蔽，继续保留为共享场景载体
+  - 这一步不再做“硬隔离 context”，而是做“软 ownership 引导”，更符合 Z-Image 当前架构的适配方向。
+- 预期收益：
+  - 减少 foreign region token 被当前 region query 直接吸收，缓解跨 region 污染。
+  - 保留完整 scene 上下文，避免之前硬切 context 带来的整体耦合变差。
+- 已知风险：
+  - 偏置强度若过大，可能让 region 更新过度保守，出现主体细节不足或区域僵硬。
+  - 这仍是 Z-Image 适配策略，不是论文原始 joint-attention 公式的直接复刻。
+- 验证方式/结果：
+  - 本地 `py_compile` 校验。
+  - 待用户实机验证不重叠四 region 场景下，位置偏移和串扰是否下降。
+
+### 2026-04-01 / `pending`
+
+- 背景问题：
   - 当前 `reverse adaptation` 虽然已经改成了 `buffered residuals`，但实际写回目标仍是整片 `local_context_indices`。
   - 这意味着 residual 仍会作用到大范围纯背景 token，而不只是实例周围真正需要“让位”和“消缝”的局部背景。
   - 在 Z-Image 的 unified self-attention 下，这种大范围背景改写更容易带来背景统计漂移，和用户观察到的“背景不稳、局部发灰”一致。
