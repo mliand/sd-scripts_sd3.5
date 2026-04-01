@@ -1,7 +1,7 @@
 {
-  "background_prompt": "a clean minimal modern living room interior, warm daylight, light oak wood floor, plain cream walls, soft natural shadows, uncluttered Scandinavian design, no extra decoration, no wall art, no shelves, magazine illustration quality",
-  "scene_prompt": "a detailed interior design illustration of a clean minimal modern living room, balanced composition, warm daylight, Scandinavian style, exactly one sofa placed along the left wall, exactly one low table placed in the center foreground, exactly one tall lamp standing on the far right side, and exactly one plant standing on the floor in the back corner, no extra furniture, cohesive materials, realistic perspective, refined decor rendering",
-  "negative_prompt": "bad quality, blurry, ugly, unclear, dirty, bad structure, duplicate furniture, extra furniture, extra objects, mixed objects, misplaced objects, object leakage, floating objects, deformed, messy composition, cluttered room, broken perspective",
+  "background_prompt": "a clean outdoor scene with short grass, soft daylight, a pale blue sky, minimal background details, no extra objects, illustration quality",
+  "scene_prompt": "a clean outdoor illustration, balanced composition, soft daylight, exactly one cat on the left, exactly one dog on the right, and exactly one red suitcase in the center foreground, no extra animals, no extra luggage, minimal background details",
+  "negative_prompt": "bad quality, blurry, ugly, unclear, dirty, bad structure, duplicate animals, extra animals, duplicate luggage, extra luggage, mixed objects, misplaced objects, object leakage, floating objects, deformed, messy composition, cluttered background",
   "config": {
     "eta1": 0.25,
     "eta2": 0.7,
@@ -11,24 +11,19 @@
   },
   "regions": [
     {
-      "region_prompt": "exactly one sofa",
-      "bbox": [70, 430, 430, 860],
+      "region_prompt": "exactly one cat",
+      "bbox": [90, 300, 360, 760],
       "layer_index": 1
     },
     {
-      "region_prompt": "exactly one table",
-      "bbox": [500, 640, 740, 820],
+      "region_prompt": "exactly one red suitcase",
+      "bbox": [410, 420, 650, 820],
       "layer_index": 2
     },
     {
-      "region_prompt": "exactly one lamp",
-      "bbox": [850, 300, 980, 900],
+      "region_prompt": "exactly one dog",
+      "bbox": [720, 280, 980, 780],
       "layer_index": 3
-    },
-    {
-      "region_prompt": "exactly one plant",
-      "bbox": [620, 220, 760, 560],
-      "layer_index": 4
     }
   ]
 }
