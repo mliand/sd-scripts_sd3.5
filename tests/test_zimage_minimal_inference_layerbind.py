@@ -579,6 +579,97 @@ def test_phase1_resets_region_text_tokens_from_prompt_each_timestep(monkeypatch)
     assert torch.allclose(region_states[0]["text_tokens"], region_tokens)
 
 
+def test_phase1_reverse_adaptation_writes_background_back_to_global_tokens(monkeypatch):
+    transformer = create_tiny_zimage_model()
+    device = torch.device("cpu")
+    cap_mask = torch.tensor([[True, True, True]], device=device)
+    cap_feats = torch.randn(1, 3, 12, device=device)
+    scene_tokens, scene_freqs = transformer.prepare_caption_tokens(cap_feats, cap_mask, apply_context_refiner=False)
+    region_tokens, region_freqs = transformer.prepare_caption_tokens(cap_feats, cap_mask, apply_context_refiner=False)
+
+    scene_condition = {"tokens": scene_tokens.clone(), "mask": cap_mask, "freqs": scene_freqs}
+    background_condition = {"tokens": scene_tokens.clone(), "mask": cap_mask, "freqs": scene_freqs}
+    region_conditions = [{"tokens": region_tokens.clone(), "freqs": region_freqs}]
+    region_states = [
+        {
+            "layer_index": 1,
+            "bbox": (0, 0, 16, 16),
+            "prompt": "object",
+            "indices": torch.tensor([0], device=device),
+            "background_indices": torch.tensor([1, 2, 3], device=device),
+            "foreign_region_indices": torch.zeros((0,), dtype=torch.long, device=device),
+            "is_occluding_hint": False,
+            "branch_patches": None,
+            "branch_tokens": None,
+            "text_tokens": None,
+            "region_mask": torch.ones((1, 1, 1), device=device),
+            "alpha_mask": None,
+        }
+    ]
+
+    call_counts = {"branch": 0, "background": 0, "text": 0}
+    original_replace_token_subset = transformer.replace_token_subset
+    captured = {}
+
+    def fake_contextual_forward(
+        self,
+        query_states,
+        query_freqs_cis,
+        context_states=None,
+        context_freqs_cis=None,
+        adaln_input=None,
+        attn_params=None,
+        include_query_in_kv=True,
+        segment_logit_biases=None,
+    ):
+        if context_states is None:
+            return query_states
+        context_list = context_states if isinstance(context_states, list) else [context_states]
+        if include_query_in_kv and len(context_list) == 1:
+            call_counts["branch"] += 1
+            return query_states + 1.0
+        if include_query_in_kv and len(context_list) == 2:
+            call_counts["background"] += 1
+            return query_states + 2.0
+        call_counts["text"] += 1
+        return query_states
+
+    def fake_replace_token_subset(tokens, token_indices, replacement_tokens):
+        captured["indices"] = torch.as_tensor(token_indices).clone()
+        captured["replacement_tokens"] = replacement_tokens.clone()
+        return original_replace_token_subset(tokens, token_indices, replacement_tokens)
+
+    for layer in transformer.layers:
+        monkeypatch.setattr(layer, "contextual_forward", types.MethodType(fake_contextual_forward, layer))
+    monkeypatch.setattr(transformer, "replace_token_subset", fake_replace_token_subset)
+
+    sigmas = torch.tensor([1.0, 0.5, 0.0], device=device)
+    latent = torch.randn(1, 16, 1, 4, 4, device=device)
+    zimage_minimal_inference.run_layerbind_forward(
+        transformer,
+        latent,
+        torch.tensor([0.5], device=device),
+        sigmas,
+        0,
+        scene_condition,
+        background_condition,
+        region_conditions,
+        region_states,
+        phase="phase1",
+        hard_binding_layers=[0],
+        beta=0.7,
+        blend_mode="alpha",
+        gamma=0.9,
+        poisson_lambda=0.5,
+        phase2_delta_scale=0.5,
+        apply_phase1_blend=False,
+    )
+
+    assert call_counts["background"] > 0
+    assert torch.equal(captured["indices"], torch.tensor([1, 2, 3], dtype=torch.long))
+    assert captured["replacement_tokens"].shape[1] == 3
+
+
 def test_phase2_resets_region_text_tokens_from_prompt_each_timestep(monkeypatch):
     transformer = create_tiny_zimage_model()
     device = torch.device("cpu")

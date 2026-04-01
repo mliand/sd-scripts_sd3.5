@@ -1032,6 +1032,11 @@ def run_layerbind_forward(
                             include_query_in_kv=True,
                             segment_logit_biases=background_segment_biases,
                         )
+                        x_tokens = transformer.replace_token_subset(
+                            x_tokens,
+                            local_context_indices,
+                            adapted_background.to(dtype=x_tokens.dtype),
+                        )
                         local_background_tokens = adapted_background
                         local_background_freqs = background_freqs
                 else:

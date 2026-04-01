@@ -26,6 +26,27 @@
 
 ## 4. 改进记录
 
+### 2026-04-01 / `pending`
+
+- 背景问题：
+  - 当前女孩和猫虽然位置正确、主体成形，但主体表面仍带一点低饱和、发暗、残噪的质感。
+  - 对照论文 `4.2 Hard Binding and Reverse Adaptation` 后发现，当前实现虽然计算了 hard-binding 层中的 `adapted_background`，但它只被作为局部变量参与 region text 更新，没有真正写回全局 image token。
+  - 这会导致论文中“背景给主体腾位置、并与主体保持 seamless blend”的 reverse adaptation 没有真正发生在 global path 上。
+  - 结果是：`t1` 时主体 branch 被写回了，但 global background carrier 仍保留原有统计，主体更容易表现为发灰、发暗、像半去噪态。
+- 改动点：
+  - 在 `Phase1` hard-binding 层中，当 `adapted_background` 计算出来后，显式写回 `x_tokens` 的对应 `local_context_indices`。
+  - 这样 reverse adaptation 不再只是“算出来供 text_tokens 使用”，而是真正作用于 global image path。
+  - 新增测试：验证 `Phase1` hard-binding 会调用 `replace_token_subset`，把背景适配结果写回 global image tokens。
+- 预期收益：
+  - 减少主体与背景统计不一致导致的发灰、发暗、低饱和问题。
+  - 让主体在 `t1` 后更自然地融入全局 carrier，而不是像局部 branch 贴回去的半成品。
+- 已知风险：
+  - 若 reverse adaptation 过强，可能让 global background 被 region branch 过度牵引，带来新的概念泄漏。
+  - 当前只在 hard-binding 层做此写回，收益仍依赖 layer search 选中的层是否足够有效。
+- 验证方式/结果：
+  - 本地 `py_compile` 校验。
+  - 待用户实机验证主体质感是否更干净、更亮、更饱和。
+
 ### 2026-03-31 / `pending`
 
 - 背景问题：
