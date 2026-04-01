@@ -55,6 +55,29 @@
   - 本地 `py_compile` 校验。
   - 待用户实机验证主体质感是否更干净、更亮、更饱和。
 
+### 2026-04-01 / `pending`
+
+- 背景问题：
+  - 继续排查 reverse adaptation 后发现，当前实现中 background query 在 attend branch context 时，给 branch 作为 context 的 RoPE 频率输入仍然来自 `x_freqs_cis` 的全局子集。
+  - 但 branch token 自身已经是在 `region-local RoPE` 下演化出来的，这会导致 reverse adaptation 的 query/context 坐标系不一致。
+  - 这种位置编码错配会直接影响 background <- branch 的对齐质量，表现为：
+    - background harmonization 不稳定
+    - 主体边缘发灰、发虚
+    - 整体质感偏暗、像半去噪态
+- 改动点：
+  - 将 reverse adaptation 中 branch context 的 `context_freqs_cis` 从全局 `x_freqs_cis` 子集改为 branch 自己的 `branch_freqs`。
+  - 这样 background query 仍使用全局 image freq，但 branch context 的 key/value 位置编码与 branch token 的真实演化坐标系保持一致。
+  - 新增测试：验证 reverse adaptation 在 `background contextual_forward` 中传给 branch context 的第二个 freq 张量确实等于 `branch_freqs`。
+- 预期收益：
+  - 修正 reverse adaptation 的显式位置编码错配。
+  - 减少 background <- branch 调和时的错位和发灰问题。
+- 已知风险：
+  - 即使修复 freq 错配，reverse adaptation 与当前 `t1 foreground-only blend` 的机制冲突仍然可能存在。
+  - 因此若收益有限，下一步仍需继续处理作用点冲突，而不只是位置编码。
+- 验证方式/结果：
+  - 本地 `py_compile` 校验。
+  - 待用户实机验证主体边缘和整体质感是否进一步改善。
+
 ### 2026-03-31 / `pending`
 
 - 背景问题：
