@@ -11,22 +11,22 @@
   },
   "regions": [
     {
-      "region_prompt": "a beige fabric sofa, modern Scandinavian design, clean silhouette, centered in the region, occupying most of the region, visible cushions, refined upholstery texture",
+      "region_prompt": "a sofa",
       "bbox": [90, 360, 460, 820],
       "layer_index": 1
     },
     {
-      "region_prompt": "a round wooden coffee table, centered in the region, occupying most of the region, clean tabletop, slim legs, modern interior styling",
+      "region_prompt": "a coffee table",
       "bbox": [430, 470, 660, 760],
       "layer_index": 2
     },
     {
-      "region_prompt": "a tall floor lamp, slender metal stand, warm fabric lampshade, centered in the region, occupying most of the region, modern interior design",
+      "region_prompt": "a floor lamp",
       "bbox": [760, 220, 950, 880],
       "layer_index": 3
     },
     {
-      "region_prompt": "a leafy indoor plant in a ceramic pot, broad green leaves, centered in the region, occupying most of the region, decorative houseplant",
+      "region_prompt": "an indoor plant",
       "bbox": [640, 120, 900, 430],
       "layer_index": 4
     }
