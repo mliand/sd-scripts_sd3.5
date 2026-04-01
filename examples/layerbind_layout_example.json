@@ -1,6 +1,6 @@
 {
   "background_prompt": "a cozy modern living room interior, warm daylight from large windows, oak wood floor, cream walls, soft natural shadows, clean Scandinavian interior design, magazine illustration quality",
-  "scene_prompt": "a detailed interior design illustration of a cozy modern living room, balanced composition, warm daylight, clean Scandinavian style, a beige sofa on the left, a round wooden coffee table in the center, a tall floor lamp on the right, and a leafy indoor plant in the back corner, cohesive materials, realistic proportions, refined decor rendering",
+  "scene_prompt": "a detailed interior design illustration of a cozy modern living room, balanced composition, warm daylight, clean Scandinavian style, a sofa on the left, a table in the center, a lamp on the right, and a plant in the back corner, cohesive materials, realistic proportions, refined decor rendering",
   "negative_prompt": "bad quality, blurry, ugly, unclear, dirty, bad structure, duplicate furniture, mixed objects, floating objects, deformed, messy composition, cluttered room, broken perspective",
   "config": {
     "eta1": 0.25,
@@ -16,17 +16,17 @@
       "layer_index": 1
     },
     {
-      "region_prompt": "a coffee table",
+      "region_prompt": "a table",
       "bbox": [430, 470, 660, 760],
       "layer_index": 2
     },
     {
-      "region_prompt": "a floor lamp",
+      "region_prompt": "a lamp",
       "bbox": [760, 220, 950, 880],
       "layer_index": 3
     },
     {
-      "region_prompt": "an indoor plant",
+      "region_prompt": "a plant",
       "bbox": [640, 120, 900, 430],
       "layer_index": 4
     }
