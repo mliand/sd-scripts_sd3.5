@@ -28,7 +28,6 @@ LAYERBIND_PHASE2_DELTA_ALPHA_POWER = 1.5
 LAYERBIND_PHASE2_QUERY_ALPHA_THRESHOLD = 0.35
 LAYERBIND_PHASE2_QUERY_MIN_FRACTION = 0.15
 LAYERBIND_PHASE2_SELF_REGION_ATTN_BIAS = 0.35
-LAYERBIND_PHASE2_FOREIGN_REGION_ATTN_PENALTY = -1.25
 LAYERBIND_PHASE1_REVERSE_ADAPTATION_SCALE = 0.20
 LAYERBIND_PHASE1_REVERSE_ADAPTATION_RADIUS = 2
 
@@ -472,9 +471,7 @@ def build_layerbind_phase2_token_logit_bias(
         image_bias[..., region_indices.to(device=device, dtype=torch.long)] = float(LAYERBIND_PHASE2_SELF_REGION_ATTN_BIAS)
 
     if foreign_region_indices is not None and foreign_region_indices.numel() > 0:
-        image_bias[..., foreign_region_indices.to(device=device, dtype=torch.long)] = float(
-            LAYERBIND_PHASE2_FOREIGN_REGION_ATTN_PENALTY
-        )
+        image_bias[..., foreign_region_indices.to(device=device, dtype=torch.long)] = float("-inf")
 
     return token_bias
 

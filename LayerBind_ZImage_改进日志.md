@@ -29,6 +29,29 @@
 ### 2026-04-01 / `pending`
 
 - 背景问题：
+  - 当前最稳定的基线是 `Phase2 token-level attention bias`，它确实让 `sofa/lamp` 这类强概念更贴合各自 region。
+  - 但用户实测仍出现明显的级联污染链：`region1` 抢 `region2`，随后 `region2` 再抢 `region4`，导致 `region4` 完全失去自身语义。
+  - 这说明此前的 `foreign-region` 只是软惩罚（negative bias），仍不足以阻断 unified self-attention 下的强语义跨区传播。
+- 改动点：
+  - 保留 `Phase2` token-level ownership 机制，但将 `foreign-region image token` 从软性负偏置改为真正的 hard mask。
+  - 具体做法：
+    - 当前 region 对应的 image token 仍保留轻微正偏置
+    - foreign-region image token 直接写入 `-inf` attention logit
+    - 纯背景 token 继续保持可见
+  - 这样 `Phase2` local path 仍能利用共享背景和 scene 语义，但不再允许 region query 直接读取其他 region 的图像 token。
+- 预期收益：
+  - 直接切断 `region1 -> region2 -> region4` 这种级联污染路径。
+  - 保留背景协调能力，同时把跨区语义泄漏从“倾向性抑制”提升到“结构性阻断”。
+- 已知风险：
+  - 硬 mask 比 soft bias 更激进，若某些 case 依赖跨实例视觉参照，可能让整体耦合感下降。
+  - 这一步是明确的 Z-Image 架构适配，不是论文原始 joint-attention 公式的直接复现。
+- 验证方式/结果：
+  - 本地 `py_compile` 校验。
+  - 待用户验证级联污染是否显著下降，以及弱 region 是否恢复自身语义。
+
+### 2026-04-01 / `pending`
+
+- 背景问题：
   - 在将示例 layout 改为完全不重叠后，region 对不齐和跨 region 污染仍然存在，说明主问题不只是 bbox 叠加，而更偏向 attention 机制本身。
   - 进一步检查当前实现可见：`Phase2` 虽然有 `segment_logit_biases`，但它只能对整段 `text / global image` 做统一偏置，无法区分 `global_x_tokens` 内部哪些 token 属于当前 region、哪些属于 foreign region、哪些只是纯背景。
   - 对 Z-Image 的 unified self-attention 而言，这个粒度过粗，当前 region query 很容易直接吸收 foreign region object token，导致位置偏移和语义串扰。
