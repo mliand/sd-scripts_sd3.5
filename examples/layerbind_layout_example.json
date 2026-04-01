@@ -1,7 +1,7 @@
 {
-  "background_prompt": "an outdoor grassy field with soft green grass, a bright daytime sky, gentle sunlight, children's book editorial style, soft watercolor pencil texture, pastel color palette",
-  "scene_prompt": "a close shot children's book illustration in an outdoor grassy field, a young girl centered in the frame and occupying most of the image, wearing a red dress, and a small orange cat on the right side occupying most of its area, bright daytime sky, soft watercolor pencil texture, pastel colors, gentle sunlight, cohesive illustration style",
-  "negative_prompt": "bad quality, blurry, ugly, unclear, dirty, bad structure, duplicate subjects, mixed objects, extra limbs, extra animals, deformed, messy composition",
+  "background_prompt": "a cozy modern living room interior, warm daylight from large windows, oak wood floor, cream walls, soft natural shadows, clean Scandinavian interior design, magazine illustration quality",
+  "scene_prompt": "a detailed interior design illustration of a cozy modern living room, balanced composition, warm daylight, clean Scandinavian style, a beige sofa on the left, a round wooden coffee table in the center, a tall floor lamp on the right, and a leafy indoor plant in the back corner, cohesive materials, realistic proportions, refined decor rendering",
+  "negative_prompt": "bad quality, blurry, ugly, unclear, dirty, bad structure, duplicate furniture, mixed objects, floating objects, deformed, messy composition, cluttered room, broken perspective",
   "config": {
     "eta1": 0.25,
     "eta2": 0.7,
@@ -11,14 +11,24 @@
   },
   "regions": [
     {
-      "region_prompt": "a young girl, close shot, upper body to knee-up view, facing forward, centered in the region, occupying most of the region, wearing a red dress, children's book illustration, soft watercolor pencil texture, pastel colors",
-      "bbox": [220, 140, 700, 960],
+      "region_prompt": "a beige fabric sofa, modern Scandinavian design, clean silhouette, centered in the region, occupying most of the region, visible cushions, refined upholstery texture",
+      "bbox": [90, 360, 460, 820],
       "layer_index": 1
     },
     {
-      "region_prompt": "a small orange cat, close shot, sitting, centered in the region, occupying most of the region, facing slightly left, children's book illustration, soft watercolor pencil texture, pastel colors",
-      "bbox": [700, 360, 980, 840],
+      "region_prompt": "a round wooden coffee table, centered in the region, occupying most of the region, clean tabletop, slim legs, modern interior styling",
+      "bbox": [430, 470, 660, 760],
       "layer_index": 2
+    },
+    {
+      "region_prompt": "a tall floor lamp, slender metal stand, warm fabric lampshade, centered in the region, occupying most of the region, modern interior design",
+      "bbox": [760, 220, 950, 880],
+      "layer_index": 3
+    },
+    {
+      "region_prompt": "a leafy indoor plant in a ceramic pot, broad green leaves, centered in the region, occupying most of the region, decorative houseplant",
+      "bbox": [640, 120, 900, 430],
+      "layer_index": 4
     }
   ]
 }
