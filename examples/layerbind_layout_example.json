@@ -1,6 +1,6 @@
 {
   "background_prompt": "a clean outdoor scene with short grass, soft daylight, a pale blue sky, minimal background details, no extra objects, illustration quality",
-  "scene_prompt": "a clean outdoor illustration, balanced composition, soft daylight, exactly one cat on the left, exactly one dog on the right, and exactly one red suitcase in the center foreground, no extra animals, no extra luggage, minimal background details",
+  "scene_prompt": "a clean outdoor illustration, balanced composition, soft daylight, exactly one black cat on the left, exactly one white dog on the right, and exactly one red suitcase in the center foreground, no extra animals, no extra luggage, minimal background details",
   "negative_prompt": "bad quality, blurry, ugly, unclear, dirty, bad structure, duplicate animals, extra animals, duplicate luggage, extra luggage, mixed objects, misplaced objects, object leakage, floating objects, deformed, messy composition, cluttered background",
   "config": {
     "eta1": 0.25,
@@ -11,17 +11,17 @@
   },
   "regions": [
     {
-      "region_prompt": "exactly one cat",
+      "region_prompt": "a black cat",
       "bbox": [90, 300, 360, 760],
       "layer_index": 1
     },
     {
-      "region_prompt": "exactly one red suitcase",
+      "region_prompt": "a red suitcase",
       "bbox": [410, 420, 650, 820],
       "layer_index": 2
     },
     {
-      "region_prompt": "exactly one dog",
+      "region_prompt": "a white dog",
       "bbox": [720, 280, 980, 780],
       "layer_index": 3
     }
