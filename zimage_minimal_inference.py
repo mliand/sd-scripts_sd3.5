@@ -418,6 +418,21 @@ def build_layerbind_reverse_adaptation_indices(
     return local_indices[keep_mask].sort().values
 
 
+def build_layerbind_phase2_background_indices(
+    region_indices: torch.Tensor,
+    seq_len: int,
+    device: torch.device,
+    forbidden_indices: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    all_indices = torch.arange(seq_len, device=device, dtype=torch.long)
+    keep_mask = torch.ones(seq_len, device=device, dtype=torch.bool)
+    if region_indices.numel() > 0:
+        keep_mask[region_indices.to(device=device, dtype=torch.long)] = False
+    if forbidden_indices is not None and forbidden_indices.numel() > 0:
+        keep_mask[forbidden_indices.to(device=device, dtype=torch.long)] = False
+    return all_indices[keep_mask]
+
+
 def build_layerbind_segment_logit_biases(
     include_query_in_kv: bool,
     query_length: int,
@@ -982,6 +997,12 @@ def run_layerbind_forward(
                 forbidden_indices=region_state.get("foreign_region_indices"),
                 radius=LAYERBIND_PHASE1_REVERSE_ADAPTATION_RADIUS,
             )
+            region_state["phase2_background_indices"] = build_layerbind_phase2_background_indices(
+                region_state["indices"],
+                seq_len=x_meta["seq_len"],
+                device=x_tokens.device,
+                forbidden_indices=region_state.get("foreign_region_indices"),
+            )
             region_state["context_seq_len"] = x_meta["seq_len"]
         region_state["token_shape"] = x_meta["token_shape"]
 
@@ -1179,21 +1200,31 @@ def run_layerbind_forward(
                     query_positions = torch.arange(region_tokens.shape[1], device=region_tokens.device, dtype=torch.long)
                 query_tokens = region_tokens.index_select(1, query_positions)
                 query_freqs = region_freqs.index_select(1, query_positions)
+                phase2_background_indices = region_state.get("phase2_background_indices")
+                phase2_context_states = [region_state["text_tokens"], region_tokens]
+                phase2_context_freqs = [region_condition["freqs"], region_freqs]
+                phase2_context_roles = ["text_anchor", "branch"]
+                phase2_context_lengths = [region_state["text_tokens"].shape[1], region_tokens.shape[1]]
+                if phase2_background_indices is not None and phase2_background_indices.numel() > 0:
+                    phase2_background_tokens, phase2_background_freqs = transformer.select_token_subset(
+                        global_x_tokens, phase2_background_indices, x_freqs_cis
+                    )
+                    phase2_context_states.append(phase2_background_tokens)
+                    phase2_context_freqs.append(phase2_background_freqs)
+                    phase2_context_roles.append("local_global_sparse")
+                    phase2_context_lengths.append(phase2_background_tokens.shape[1])
                 include_query_in_kv = False
                 local_segment_biases = build_layerbind_segment_logit_biases(
                     include_query_in_kv=include_query_in_kv,
                     query_length=query_tokens.shape[1],
-                    context_lengths=[
-                        region_state["text_tokens"].shape[1],
-                        global_x_tokens.shape[1],
-                    ],
-                    context_roles=["text_anchor", "local_global"],
+                    context_lengths=phase2_context_lengths,
+                    context_roles=phase2_context_roles,
                 )
                 updated_query_tokens = layer.contextual_forward(
                     query_tokens,
                     query_freqs,
-                    context_states=[region_state["text_tokens"], global_x_tokens],
-                    context_freqs_cis=[region_condition["freqs"], x_freqs_cis],
+                    context_states=phase2_context_states,
+                    context_freqs_cis=phase2_context_freqs,
                     adaln_input=adaln_input,
                     include_query_in_kv=include_query_in_kv,
                     segment_logit_biases=local_segment_biases,

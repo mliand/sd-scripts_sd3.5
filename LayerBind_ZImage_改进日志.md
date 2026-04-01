@@ -29,6 +29,30 @@
 ### 2026-04-01 / `pending`
 
 - 背景问题：
+  - 当 region 数量从 2 个增加到 4 个后，跨 region 污染明显加重，例如 `plant` 会跑到 `sofa/table` 区域之间。
+  - 对照论文 Appendix C.2 可知，这类 `concept blending` 的根因是 local update 缺少足够的 layer-wise isolation，region 之间发生 attention leakage。
+  - 当前实现里，`Phase2` 的 local path 直接把整张 `global_x_tokens` 当作每个 region 的 image context，这会让 foreign-region token 直接参与当前 region 的局部更新；region 越多，这种泄漏越严重。
+- 改动点：
+  - 新增 `build_layerbind_phase2_background_indices(...)`，显式构造“纯背景” image context：
+    - 排除当前 region 自身 token
+    - 排除其他 foreign-region token
+  - `Phase2` 的 local attention context 从：
+    - `text + full global image`
+    - 改为 `text + self region carrier + pure background`
+  - 这样当前 region 仍能看到自己的图像载体和共享背景，但不再直接读取其他 region 的对象 token。
+- 预期收益：
+  - 降低四区域及更多 region 场景下的跨 region 语义污染。
+  - 保留 `scene_prompt` 作为 full-scene 条件，同时把对象级隔离主要放回算法而不是 prompt 规避。
+- 已知风险：
+  - 这一步是面向 Z-Image unified self-attention 的适配，不是论文 Eq.10 的原样实现。
+  - 若隔离过强，极少数需要跨实例视觉参照的 case 可能会损失一点整体耦合感。
+- 验证方式/结果：
+  - 本地 `py_compile` 校验。
+  - 待用户实机验证四 region 场景下 `plant` 等对象是否还会跨区泄漏。
+
+### 2026-04-01 / `pending`
+
+- 背景问题：
   - 当前 `reverse adaptation` 虽然已经改成了 `buffered residuals`，但实际写回目标仍是整片 `local_context_indices`。
   - 这意味着 residual 仍会作用到大范围纯背景 token，而不只是实例周围真正需要“让位”和“消缝”的局部背景。
   - 在 Z-Image 的 unified self-attention 下，这种大范围背景改写更容易带来背景统计漂移，和用户观察到的“背景不稳、局部发灰”一致。
