@@ -29,6 +29,26 @@
 ### 2026-04-01 / `pending`
 
 - 背景问题：
+  - 在加入 `Phase2` token-level attention ownership bias 后，`sofa` 和 `lamp` 的位置已经能稳定贴合各自 region，说明空间路由方向是有效的。
+  - 但 `table` 和 `plant` 仍然出现语义错配：例如 `table region` 里生成 `plant`，`plant region` 里出现与墙面相关的内容。
+  - 这说明当前位置问题已部分缓解，剩余主问题更像是“弱概念 region 的文本锚点仍被全局 scene 语义带偏”，而不是单纯的空间 attention 泄漏。
+- 改动点：
+  - 将 `LAYERBIND_PHASE2_TEXT_UPDATE_SCALE` 从 `0.35` 降为 `0.0`，停止 `Phase2` block 内对 `region text` 的持续漂移。
+  - 为 `Phase2 local path` 单独新增更强的 `phase2_text_anchor` bias，高于通用 `text_anchor`，使 query 更稳定地绑定原始 region prompt。
+  - 本次不改 prompt、不改 bbox，也不改 ownership bias，专门验证“region text drift”是否是 table/plant 错配的主因。
+- 预期收益：
+  - 减少弱概念 region 在 `Phase2` 中被 `scene prompt` 重写或带偏。
+  - 让 `table`、`plant` 这类依赖精细语义区分的对象保持更稳定的 region prompt 绑定。
+- 已知风险：
+  - 完全冻结 `Phase2` text update 可能会损失部分细节适配能力。
+  - 若问题主要来自图像 token ownership 而不是 text drift，这一步收益会有限。
+- 验证方式/结果：
+  - 本地 `py_compile` 校验。
+  - 待用户验证 `table/plant` 是否仍会互换或语义漂移。
+
+### 2026-04-01 / `pending`
+
+- 背景问题：
   - 在将示例 layout 改为完全不重叠后，region 对不齐和跨 region 污染仍然存在，说明主问题不只是 bbox 叠加，而更偏向 attention 机制本身。
   - 进一步检查当前实现可见：`Phase2` 虽然有 `segment_logit_biases`，但它只能对整段 `text / global image` 做统一偏置，无法区分 `global_x_tokens` 内部哪些 token 属于当前 region、哪些属于 foreign region、哪些只是纯背景。
   - 对 Z-Image 的 unified self-attention 而言，这个粒度过粗，当前 region query 很容易直接吸收 foreign region object token，导致位置偏移和语义串扰。
