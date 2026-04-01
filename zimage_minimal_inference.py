@@ -28,6 +28,7 @@ LAYERBIND_PHASE2_DELTA_ALPHA_POWER = 1.5
 LAYERBIND_PHASE2_QUERY_ALPHA_THRESHOLD = 0.35
 LAYERBIND_PHASE2_QUERY_MIN_FRACTION = 0.15
 LAYERBIND_PHASE1_REVERSE_ADAPTATION_SCALE = 0.20
+LAYERBIND_PHASE2_NON_OCCLUDING_INJECTION_SCALE = 0.75
 
 
 def parse_layer_spec(text: str):
@@ -1155,7 +1156,11 @@ def run_layerbind_forward(
                     include_query_in_kv=include_query_in_kv,
                     segment_logit_biases=local_segment_biases,
                 )
-                region_injection_scale = 1.0 if region_state.get("is_occluding", False) else 0.60
+                region_injection_scale = (
+                    1.0
+                    if region_state.get("is_occluding", False)
+                    else LAYERBIND_PHASE2_NON_OCCLUDING_INJECTION_SCALE
+                )
                 updated_query_tokens = query_tokens.lerp(
                     updated_query_tokens, float(phase2_delta_scale) * region_injection_scale
                 )
