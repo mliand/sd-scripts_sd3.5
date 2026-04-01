@@ -1199,11 +1199,11 @@ def run_layerbind_forward(
                 region_tokens = global_x_tokens.index_select(1, region_state["indices"])
                 if region_state["text_tokens"] is None:
                     region_state["text_tokens"] = region_condition["tokens"].clone()
-                # Paper Eq.10 updates the whole regional image embedding e_Ireg rather than
-                # a sparsified foreground query subset. On Z-Image, sparse query updates can
-                # leave weak concepts underwritten, so Phase2 now updates the full region.
-                query_tokens = region_tokens
-                query_freqs = region_freqs
+                query_positions = select_phase2_query_positions(region_state)
+                if query_positions.numel() == 0:
+                    query_positions = torch.arange(region_tokens.shape[1], device=region_tokens.device, dtype=torch.long)
+                query_tokens = region_tokens.index_select(1, query_positions)
+                query_freqs = region_freqs.index_select(1, query_positions)
                 include_query_in_kv = False
                 local_segment_biases = build_layerbind_segment_logit_biases(
                     include_query_in_kv=include_query_in_kv,
@@ -1237,7 +1237,8 @@ def run_layerbind_forward(
                 updated_query_tokens = query_tokens.lerp(
                     updated_query_tokens, float(phase2_delta_scale) * region_injection_scale
                 )
-                local_tokens = updated_query_tokens.to(dtype=region_tokens.dtype)
+                local_tokens = region_tokens.clone()
+                local_tokens.index_copy_(1, query_positions, updated_query_tokens.to(dtype=local_tokens.dtype))
                 region_state["branch_tokens"] = local_tokens
                 alpha_mask = zimage_layerbind_utils.estimate_alpha_from_token_difference(
                     local_tokens,

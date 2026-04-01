@@ -29,29 +29,6 @@
 ### 2026-04-01 / `pending`
 
 - 背景问题：
-  - 在 `Phase2` token-level ownership bias 生效后，`sofa`/`lamp` 的空间位置已经明显更贴合 region，但 `table`/`plant` 这类弱概念仍然经常写错对象或被 scene 语义带偏。
-  - 对照论文 Eq.10 可见，作者的 local update 作用对象是整个 `e_Ireg`，而当前实现此前只对由 `alpha/query` 选出的局部 token 子集做更新。
-  - 这类稀疏 query 更新对强主体足够，但对 `table`、`plant` 这种视觉占比小、边界弱、容易背景化的对象，可能根本没有把整块 region 都改写成目标语义。
-- 改动点：
-  - `Phase2` 的 local update 不再只更新 `query_positions` 子集。
-  - 当前改为：整块 `region_tokens` 直接作为 query，整块 `region_freqs` 参与 local attention，随后整块 region 结果再按现有 scheduler 合成回全局路径。
-  - 其余机制保持不变：
-    - 保留 token-level ownership bias
-    - 保留 `scene + global image` 作为上下文
-    - 保留当前 `Phase2` alpha/delta compose
-- 预期收益：
-  - 让弱概念 region 获得更充分的局部语义重写。
-  - 验证 `table/plant` 错配是否主要来自“Phase2 写得不够满”，而不是 prompt 或 bbox。
-- 已知风险：
-  - 整块 region 更新会比稀疏 query 更容易把局部语义扩散到整个框内，若 ownership 仍不够强，可能放大错误对象的整框占据。
-  - 计算量也会略高于 query 子集更新。
-- 验证方式/结果：
-  - 本地 `py_compile` 校验。
-  - 待用户验证 `table/plant` 语义是否更容易写对，或是否出现“整块写错”的副作用。
-
-### 2026-04-01 / `pending`
-
-- 背景问题：
   - 在将示例 layout 改为完全不重叠后，region 对不齐和跨 region 污染仍然存在，说明主问题不只是 bbox 叠加，而更偏向 attention 机制本身。
   - 进一步检查当前实现可见：`Phase2` 虽然有 `segment_logit_biases`，但它只能对整段 `text / global image` 做统一偏置，无法区分 `global_x_tokens` 内部哪些 token 属于当前 region、哪些属于 foreign region、哪些只是纯背景。
   - 对 Z-Image 的 unified self-attention 而言，这个粒度过粗，当前 region query 很容易直接吸收 foreign region object token，导致位置偏移和语义串扰。
