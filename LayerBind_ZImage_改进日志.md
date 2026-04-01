@@ -29,6 +29,32 @@
 ### 2026-04-01 / `pending`
 
 - 背景问题：
+  - 当前图像质量和 region 位置已经比早期版本明显更稳定，但主体在各自 region 内占据的面积仍然偏小。
+  - 回看历史验证，`region-local RoPE` 和 `eta1=0.25` 对“主体只占一角/只长上半部分”已经有过明显收益；这说明当前剩余问题更像是 `Phase2` 的局部更新覆盖率不足，而不是纯几何先验缺失。
+  - 目前 `Phase2` query 选择仍然较保守：
+    - `alpha threshold = 0.35`
+    - `min fraction = 0.15`
+  - 这会让局部更新集中在小块高置信 token 上，更像“保核心”，不利于把主体扩展到更大区域。
+- 改动点：
+  - 将 `LAYERBIND_PHASE2_QUERY_ALPHA_THRESHOLD` 从 `0.35` 降到 `0.20`
+  - 将 `LAYERBIND_PHASE2_QUERY_MIN_FRACTION` 从 `0.15` 提到 `0.35`
+  - 其余机制保持不变：
+    - 保留 hard-masked foreign-region attention
+    - 保留当前 `Phase2` delta compose
+    - 不改 prompt / bbox / Phase1
+- 预期收益：
+  - 让 `Phase2` 的 local update 覆盖更多 region token，提升主体在框内的占比。
+  - 尤其改善 `cat/dog/suitcase` 这种位置已对但主体仍偏小的情况。
+- 已知风险：
+  - 若覆盖率过大，可能让错误语义也更容易在整块 region 内扩散。
+  - 这是覆盖率调参，不是根本架构改动，收益可能有限。
+- 验证方式/结果：
+  - 本地 `py_compile` 校验。
+  - 待用户验证主体在 region 内的面积是否明显扩大。
+
+### 2026-04-01 / `pending`
+
+- 背景问题：
   - 当前最稳定的基线是 `Phase2 token-level attention bias`，它确实让 `sofa/lamp` 这类强概念更贴合各自 region。
   - 但用户实测仍出现明显的级联污染链：`region1` 抢 `region2`，随后 `region2` 再抢 `region4`，导致 `region4` 完全失去自身语义。
   - 这说明此前的 `foreign-region` 只是软惩罚（negative bias），仍不足以阻断 unified self-attention 下的强语义跨区传播。
