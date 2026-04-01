@@ -155,10 +155,34 @@
 
 ## 3. 我们当前在 Z-Image 上的工程实现
 
-当前主入口：
+当前主入口是 `run_layerbind_forward(...)`，整体结构是：
 
-- [zimage_minimal_inference.py](/home/coco/workspace/sd-scripts_sd3.5/zimage_minimal_inference.py)
-- 核心函数：[run_layerbind_forward](/home/coco/workspace/sd-scripts_sd3.5/zimage_minimal_inference.py#L944)
+```python
+def run_layerbind_forward(
+    transformer,
+    latent_model_input,
+    timestep,
+    sigmas,
+    step_index,
+    scene_condition,
+    background_condition,
+    region_conditions,
+    region_states,
+    phase,
+    hard_binding_layers,
+    beta,
+    blend_mode,
+    gamma,
+    poisson_lambda,
+    phase2_delta_scale,
+    apply_phase1_blend,
+    layer_stats_accumulator=None,
+):
+    # 1. 先准备全局 image tokens 和 text tokens
+    # 2. Phase1: branch 初始化 + hard binding + reverse adaptation + t1 blend
+    # 3. Phase2: global path + local path + sequential compose
+    ...
+```
 
 ### 3.1 Phase 1 工程实现
 
@@ -172,19 +196,35 @@
 - `layer_index`
 - `bbox`
 
-相关代码：
+当前工程里，每个 region 会先被整理成一个 `state`：
 
-- [zimage_minimal_inference.py#L340](/home/coco/workspace/sd-scripts_sd3.5/zimage_minimal_inference.py#L340)
+```python
+states.append(
+    {
+        "layer_index": region.layer_index,
+        "bbox": region.bbox,
+        "prompt": region.region_prompt,
+        "indices": indices,                       # 当前 region 的图像 token
+        "background_indices": background_indices, # 除当前 region 外的 token
+        "foreign_region_indices": foreign_region_indices,
+        "is_occluding_hint": is_occluding_hint,
+        "branch_patches": None,
+        "branch_tokens": None,
+        "text_tokens": None,
+        "region_mask": region_mask,
+        "alpha_mask": None,
+    }
+)
+```
 
 #### 3.1.2 Branch 初始化
 
-当前 branch 仍然从全局 patch 中直接拷贝，保持与论文 Eq.4 一致：
-
-- [zimage_minimal_inference.py#L1022](/home/coco/workspace/sd-scripts_sd3.5/zimage_minimal_inference.py#L1022)
+当前 branch 仍然从全局 patch 中直接拷贝，保持与论文 Eq.4 一致。
 
 关键代码：
 
 ```python
+# 从全局 latent 的对应 region 直接拷贝，作为 branch 初始噪声
 branch_seed = image_patches.index_select(1, region_state["indices"])
 region_state["branch_patches"] = branch_seed.clone()
 ```
@@ -196,10 +236,35 @@ region_state["branch_patches"] = branch_seed.clone()
 - 普通 block：`background + region text`
 - hard-binding block：`text-only branch update + reverse adaptation`
 
-相关代码：
+普通 block：
 
-- [zimage_minimal_inference.py#L1050](/home/coco/workspace/sd-scripts_sd3.5/zimage_minimal_inference.py#L1050)
-- [zimage_minimal_inference.py#L1090](/home/coco/workspace/sd-scripts_sd3.5/zimage_minimal_inference.py#L1090)
+```python
+# 普通 block 里，branch 仍然能同时读取背景和局部文本
+region_state["branch_tokens"] = layer.contextual_forward(
+    region_state["branch_tokens"],
+    branch_freqs,
+    context_states=[background_tokens, region_state["text_tokens"]],
+    context_freqs_cis=[background_freqs, region_condition["freqs"]],
+    adaln_input=adaln_input,
+    include_query_in_kv=False,
+    segment_logit_biases=branch_segment_biases,
+)
+```
+
+hard-binding block：
+
+```python
+# hard-binding block 里，branch 只听自己的局部文本
+region_state["branch_tokens"] = layer.contextual_forward(
+    region_state["branch_tokens"],
+    branch_freqs,
+    context_states=[region_state["text_tokens"]],
+    context_freqs_cis=[region_condition["freqs"]],
+    adaln_input=adaln_input,
+    include_query_in_kv=True,
+    segment_logit_biases=branch_segment_biases,
+)
+```
 
 #### 3.1.4 Reverse Adaptation
 
@@ -209,16 +274,27 @@ region_state["branch_patches"] = branch_seed.clone()
 - 最后统一 apply
 - 并且只作用于局部 ring
 
-相关代码：
+局部 ring 选择：
 
-- [build_layerbind_reverse_adaptation_indices](/home/coco/workspace/sd-scripts_sd3.5/zimage_minimal_inference.py#L384)
-- [apply_reverse_adaptation_residuals](/home/coco/workspace/sd-scripts_sd3.5/zimage_minimal_inference.py#L493)
+```python
+# 只在 region 周围一个局部 ring 上做 reverse adaptation，
+# 避免整片背景都被 branch 牵引
+ys = torch.arange(y1, y2, device=device, dtype=torch.long)
+xs = torch.arange(x1, x2, device=device, dtype=torch.long)
+grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
+local_indices = (grid_y * token_width + grid_x).reshape(-1)
+```
+
+统一 residual 写回：
+
+```python
+# 不直接原地改全局，而是先累计 residual，最后统一 apply
+average_residual = residual_sum / count.clamp(min=1.0)
+update_mask = (count > 0).to(dtype=x_tokens.dtype)
+return x_tokens + float(scale) * average_residual * update_mask
+```
 
 #### 3.1.5 t1 Blend
-
-当前 `t1` 的关键实现：
-
-- [blend_region_tokens](/home/coco/workspace/sd-scripts_sd3.5/zimage_minimal_inference.py#L710)
 
 代码逻辑：
 
@@ -231,7 +307,10 @@ region_state["branch_patches"] = branch_seed.clone()
 关键代码：
 
 ```python
+# 底层：只把估计到的前景区域写回，保留共享背景
 update = binary_mask * branch_tokens + (1.0 - binary_mask) * current
+
+# 顶层：使用 alpha 做软融合
 update = alpha_mask * branch_tokens + (1.0 - alpha_mask) * current
 ```
 
@@ -239,20 +318,32 @@ update = alpha_mask * branch_tokens + (1.0 - alpha_mask) * current
 
 #### 3.2.1 Local Update
 
-当前 `Phase2` 的 local path 入口：
-
-- [zimage_minimal_inference.py#L1182](/home/coco/workspace/sd-scripts_sd3.5/zimage_minimal_inference.py#L1182)
-
 当前逻辑：
 
 - query 不是整块 region，而是 `query_positions`
 - query 来自 `region_tokens`
 - context 是 `[region_text, global_x_tokens]`
 
-相关代码：
+核心代码：
 
-- [select_phase2_query_positions](/home/coco/workspace/sd-scripts_sd3.5/zimage_minimal_inference.py#L819)
-- [zimage_minimal_inference.py#L1199](/home/coco/workspace/sd-scripts_sd3.5/zimage_minimal_inference.py#L1199)
+```python
+# 先从当前 region 里挑出一批 query token
+query_positions = select_phase2_query_positions(region_state)
+query_tokens = region_tokens.index_select(1, query_positions)
+query_freqs = region_freqs.index_select(1, query_positions)
+
+# 再让这些 token 去读 region text + 全局图像
+updated_query_tokens = layer.contextual_forward(
+    query_tokens,
+    query_freqs,
+    context_states=[region_state["text_tokens"], global_x_tokens],
+    context_freqs_cis=[region_condition["freqs"], x_freqs_cis],
+    adaln_input=adaln_input,
+    include_query_in_kv=False,
+    segment_logit_biases=local_segment_biases,
+    token_logit_bias=local_token_logit_bias,
+)
+```
 
 #### 3.2.2 Token-level Ownership Bias
 
@@ -262,27 +353,39 @@ update = alpha_mask * branch_tokens + (1.0 - alpha_mask) * current
 - foreign region token：hard mask
 - pure background：保持可见
 
-相关代码：
-
-- [build_layerbind_phase2_token_logit_bias](/home/coco/workspace/sd-scripts_sd3.5/zimage_minimal_inference.py#L458)
-- [library/zimage_model.py#L355](/home/coco/workspace/sd-scripts_sd3.5/library/zimage_model.py#L355)
+构造 bias：
 
 关键代码：
 
 ```python
+# 自己的 token 轻微加权，鼓励 query 先看自己
+if region_indices.numel() > 0:
+    image_bias[..., region_indices.to(device=device, dtype=torch.long)] = 0.35
+
+# 其他 region 直接 hard mask，阻断级联污染
 if foreign_region_indices is not None and foreign_region_indices.numel() > 0:
     image_bias[..., foreign_region_indices.to(device=device, dtype=torch.long)] = float("-inf")
 ```
 
+真正进入 attention 的位置：
+
+```python
+# Z-Image 原生只支持 segment 级 bias，我们这里扩展成 token 级 bias
+if token_logit_bias is not None:
+    custom_bias = token_logit_bias.to(device=query.device, dtype=query.dtype)
+    token_bias = token_bias + custom_bias
+
+effective_attn_params.attention_mask = token_bias
+```
+
 #### 3.2.3 当前的 Compose 方式
 
-当前不是论文 Eq.12 的 `beta * M` 直接覆盖，而是 `delta merge`：
-
-- [compose_phase2_region_tokens](/home/coco/workspace/sd-scripts_sd3.5/zimage_minimal_inference.py#L780)
+当前不是论文 Eq.12 的 `beta * M` 直接覆盖，而是 `delta merge`。
 
 关键代码：
 
 ```python
+# 只把 local path 相对 current 的增量写回，而不是整块替换
 delta = local_tokens - current
 update = current + (float(beta) * mask) * delta
 ```
@@ -313,13 +416,23 @@ update = current + (float(beta) * mask) * delta
 
 - branch 和 local path 都使用 region-local RoPE
 
-相关代码：
-
-- [create_region_local_freqs_for_caption_length](/home/coco/workspace/sd-scripts_sd3.5/zimage_minimal_inference.py#L510)
-
 原因：
 
 - 在 Z-Image 上，这一步对“主体长在框里、占比扩大”收益明显
+
+具体实现：
+
+```python
+# 不再用全局绝对坐标，而是把当前 region 重置到局部坐标系
+position_ids = torch.stack(
+    [
+        cap_seq_len + 1 + (f_idx - f_idx.min()),
+        h_idx - h_idx.min(),
+        w_idx - w_idx.min(),
+    ],
+    dim=1,
+).to(dtype=torch.int32)
+```
 
 #### 差异 2：t1 底层 blending 没有保留论文的整块 direct paste
 
@@ -365,6 +478,14 @@ update = current + (float(beta) * mask) * delta
 
 - 整块更新在 Z-Image 上更容易导致整框污染
 
+当前代码：
+
+```python
+# 当前不是整块 e_Ireg 更新，而是先筛一批 query token
+query_positions = select_phase2_query_positions(region_state)
+query_tokens = region_tokens.index_select(1, query_positions)
+```
+
 #### 差异 5：Phase 2 transparency scheduler 不是 `beta * M` 原样覆盖
 
 论文：
@@ -404,6 +525,20 @@ update = current + (float(beta) * mask) * delta
 - 必须在 token 粒度上告诉 query：
   - 哪些 token 是自己
   - 哪些 token 是 foreign region
+
+实现代码：
+
+```python
+local_token_logit_bias = build_layerbind_phase2_token_logit_bias(
+    region_state["indices"],
+    region_state.get("foreign_region_indices"),
+    query_length=query_tokens.shape[1],
+    text_length=region_state["text_tokens"].shape[1],
+    image_seq_len=global_x_tokens.shape[1],
+    device=query_tokens.device,
+    dtype=query_tokens.dtype,
+)
+```
 
 #### 新增 3：region-local geometry prior
 
@@ -506,4 +641,3 @@ Z-Image 更接近统一 self-attention 图文强耦合：
 
 - 一个在 `Z-Image` 上已经具备实用性的 `LayerBind` 区域控制实现
 - 但不是对论文 joint-attention 效果的等价复刻
-
