@@ -27,6 +27,7 @@ LAYERBIND_PHASE2_TEXT_UPDATE_SCALE = 0.35
 LAYERBIND_PHASE2_DELTA_ALPHA_POWER = 1.5
 LAYERBIND_PHASE2_QUERY_ALPHA_THRESHOLD = 0.35
 LAYERBIND_PHASE2_QUERY_MIN_FRACTION = 0.15
+LAYERBIND_PHASE1_REVERSE_ADAPTATION_SCALE = 0.20
 
 
 def parse_layer_spec(text: str):
@@ -426,6 +427,23 @@ def create_image_freqs_for_caption_length(
     )
     freqs_cis = transformer.rope_embedder(position_ids)
     return freqs_cis.unsqueeze(0).expand(batch_size, -1, -1)
+
+
+def apply_reverse_adaptation_residuals(
+    x_tokens: torch.Tensor,
+    residual_sum: torch.Tensor,
+    residual_count: torch.Tensor,
+    scale: float,
+):
+    if residual_sum.shape != x_tokens.shape:
+        raise ValueError(f"residual_sum shape mismatch: {tuple(residual_sum.shape)} vs {tuple(x_tokens.shape)}")
+    if residual_count.ndim != 3 or residual_count.shape[1] != x_tokens.shape[1]:
+        raise ValueError(f"residual_count shape mismatch: {tuple(residual_count.shape)} vs {tuple(x_tokens.shape)}")
+
+    count = residual_count.to(dtype=x_tokens.dtype)
+    average_residual = residual_sum / count.clamp(min=1.0)
+    update_mask = (count > 0).to(dtype=x_tokens.dtype)
+    return x_tokens + float(scale) * average_residual * update_mask
 
 
 def create_region_local_freqs_for_caption_length(
@@ -961,6 +979,12 @@ def run_layerbind_forward(
         x_tokens, cap_tokens_current = transformer.split_unified_tokens(unified, x_meta["seq_len"])
 
         if phase == "phase1":
+            reverse_adaptation_residual_sum = torch.zeros_like(x_tokens)
+            reverse_adaptation_residual_count = torch.zeros(
+                (x_tokens.shape[0], x_tokens.shape[1], 1),
+                device=x_tokens.device,
+                dtype=x_tokens.dtype,
+            )
             for region_state, region_condition in zip(region_states, region_conditions):
                 if region_state["indices"].numel() == 0:
                     continue
@@ -1032,11 +1056,22 @@ def run_layerbind_forward(
                             include_query_in_kv=True,
                             segment_logit_biases=background_segment_biases,
                         )
-                        x_tokens = transformer.replace_token_subset(
-                            x_tokens,
-                            local_context_indices,
-                            adapted_background.to(dtype=x_tokens.dtype),
-                        )
+                        reverse_indices = local_context_indices
+                        foreign_region_indices = region_state.get("foreign_region_indices")
+                        if foreign_region_indices is not None and foreign_region_indices.numel() > 0:
+                            write_mask = ~torch.isin(local_context_indices, foreign_region_indices)
+                            reverse_indices = local_context_indices[write_mask]
+                        if reverse_indices.numel() > 0:
+                            reverse_positions = torch.searchsorted(local_context_indices, reverse_indices)
+                            reverse_background_tokens = background_tokens.index_select(1, reverse_positions)
+                            reverse_adapted_tokens = adapted_background.index_select(1, reverse_positions)
+                            reverse_delta = (reverse_adapted_tokens - reverse_background_tokens).to(dtype=x_tokens.dtype)
+                            reverse_adaptation_residual_sum.index_add_(1, reverse_indices, reverse_delta)
+                            reverse_adaptation_residual_count.index_add_(
+                                1,
+                                reverse_indices,
+                                torch.ones_like(reverse_delta[:, :, :1], dtype=x_tokens.dtype),
+                            )
                         local_background_tokens = adapted_background
                         local_background_freqs = background_freqs
                 else:
@@ -1072,6 +1107,12 @@ def run_layerbind_forward(
                     include_query_in_kv=text_include_query,
                     segment_logit_biases=text_segment_biases,
                 )
+            x_tokens = apply_reverse_adaptation_residuals(
+                x_tokens,
+                reverse_adaptation_residual_sum,
+                reverse_adaptation_residual_count,
+                scale=LAYERBIND_PHASE1_REVERSE_ADAPTATION_SCALE,
+            )
 
         elif phase == "phase2":
             global_x_tokens = x_tokens

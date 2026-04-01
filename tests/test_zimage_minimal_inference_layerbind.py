@@ -180,6 +180,21 @@ def test_build_layerbind_local_context_indices_returns_full_global_context():
     assert torch.equal(indices, torch.tensor([0, 2, 4, 5], dtype=torch.long))
 
 
+def test_apply_reverse_adaptation_residuals_averages_overlapping_updates():
+    x_tokens = torch.zeros((1, 4, 1), dtype=torch.float32)
+    residual_sum = torch.tensor([[[0.0], [2.0], [4.0], [0.0]]], dtype=torch.float32)
+    residual_count = torch.tensor([[[0.0], [1.0], [2.0], [0.0]]], dtype=torch.float32)
+
+    updated = zimage_minimal_inference.apply_reverse_adaptation_residuals(
+        x_tokens,
+        residual_sum,
+        residual_count,
+        scale=0.5,
+    )
+
+    assert torch.allclose(updated, torch.tensor([[[0.0], [1.0], [1.0], [0.0]]]))
+
+
 def test_prepare_layerbind_layout_keeps_overlap_tokens_for_all_layers(tmp_path):
     layout_path = tmp_path / "layout_overlap.json"
     layout_path.write_text(
@@ -579,7 +594,7 @@ def test_phase1_resets_region_text_tokens_from_prompt_each_timestep(monkeypatch)
     assert torch.allclose(region_states[0]["text_tokens"], region_tokens)
 
 
-def test_phase1_reverse_adaptation_writes_background_back_to_global_tokens(monkeypatch):
+def test_phase1_reverse_adaptation_accumulates_background_residuals(monkeypatch):
     transformer = create_tiny_zimage_model()
     device = torch.device("cpu")
     cap_mask = torch.tensor([[True, True, True]], device=device)
@@ -608,7 +623,6 @@ def test_phase1_reverse_adaptation_writes_background_back_to_global_tokens(monke
     ]
 
     call_counts = {"branch": 0, "background": 0, "text": 0}
-    original_replace_token_subset = transformer.replace_token_subset
     captured = {}
 
     def fake_contextual_forward(
@@ -634,14 +648,17 @@ def test_phase1_reverse_adaptation_writes_background_back_to_global_tokens(monke
         call_counts["text"] += 1
         return query_states
 
-    def fake_replace_token_subset(tokens, token_indices, replacement_tokens):
-        captured["indices"] = torch.as_tensor(token_indices).clone()
-        captured["replacement_tokens"] = replacement_tokens.clone()
-        return original_replace_token_subset(tokens, token_indices, replacement_tokens)
+    original_apply_reverse_adaptation_residuals = zimage_minimal_inference.apply_reverse_adaptation_residuals
+
+    def fake_apply_reverse_adaptation_residuals(x_tokens, residual_sum, residual_count, scale):
+        captured["residual_sum"] = residual_sum.clone()
+        captured["residual_count"] = residual_count.clone()
+        captured["scale"] = scale
+        return original_apply_reverse_adaptation_residuals(x_tokens, residual_sum, residual_count, scale)
 
     for layer in transformer.layers:
         monkeypatch.setattr(layer, "contextual_forward", types.MethodType(fake_contextual_forward, layer))
-    monkeypatch.setattr(transformer, "replace_token_subset", fake_replace_token_subset)
+    monkeypatch.setattr(zimage_minimal_inference, "apply_reverse_adaptation_residuals", fake_apply_reverse_adaptation_residuals)
 
     sigmas = torch.tensor([1.0, 0.5, 0.0], device=device)
     latent = torch.randn(1, 16, 1, 4, 4, device=device)
@@ -666,8 +683,11 @@ def test_phase1_reverse_adaptation_writes_background_back_to_global_tokens(monke
     )
 
     assert call_counts["background"] > 0
-    assert torch.equal(captured["indices"], torch.tensor([1, 2, 3], dtype=torch.long))
-    assert captured["replacement_tokens"].shape[1] == 3
+    assert captured["scale"] == zimage_minimal_inference.LAYERBIND_PHASE1_REVERSE_ADAPTATION_SCALE
+    assert captured["residual_count"][0, 1, 0].item() > 0.0
+    assert captured["residual_count"][0, 2, 0].item() > 0.0
+    assert captured["residual_count"][0, 3, 0].item() > 0.0
+    assert captured["residual_sum"][0, 0, 0].item() == 0.0
 
 
 def test_phase2_resets_region_text_tokens_from_prompt_each_timestep(monkeypatch):
