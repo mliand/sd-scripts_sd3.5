@@ -1,7 +1,7 @@
 {
-  "background_prompt": "a cozy modern living room interior, warm daylight from large windows, oak wood floor, cream walls, soft natural shadows, clean Scandinavian interior design, magazine illustration quality",
-  "scene_prompt": "a detailed interior design illustration of a cozy modern living room, balanced composition, warm daylight, clean Scandinavian style, a sofa placed along the left wall, a low table in front of the sofa near the center foreground, a tall lamp standing on the right side, and a plant standing on the floor in the back corner, cohesive materials, realistic perspective, refined decor rendering",
-  "negative_prompt": "bad quality, blurry, ugly, unclear, dirty, bad structure, duplicate furniture, mixed objects, misplaced objects, object leakage, floating objects, deformed, messy composition, cluttered room, broken perspective",
+  "background_prompt": "a clean minimal modern living room interior, warm daylight, light oak wood floor, plain cream walls, soft natural shadows, uncluttered Scandinavian design, no extra decoration, no wall art, no shelves, magazine illustration quality",
+  "scene_prompt": "a detailed interior design illustration of a clean minimal modern living room, balanced composition, warm daylight, Scandinavian style, exactly one sofa placed along the left wall, exactly one low table in front of the sofa near the center foreground, exactly one tall lamp standing on the right side, and exactly one plant standing on the floor in the back corner, no extra furniture, cohesive materials, realistic perspective, refined decor rendering",
+  "negative_prompt": "bad quality, blurry, ugly, unclear, dirty, bad structure, duplicate furniture, extra furniture, extra objects, mixed objects, misplaced objects, object leakage, floating objects, deformed, messy composition, cluttered room, broken perspective",
   "config": {
     "eta1": 0.25,
     "eta2": 0.7,
@@ -11,22 +11,22 @@
   },
   "regions": [
     {
-      "region_prompt": "a sofa",
+      "region_prompt": "exactly one sofa",
       "bbox": [80, 420, 500, 860],
       "layer_index": 1
     },
     {
-      "region_prompt": "a table",
+      "region_prompt": "exactly one table",
       "bbox": [400, 610, 650, 810],
       "layer_index": 2
     },
     {
-      "region_prompt": "a lamp",
+      "region_prompt": "exactly one lamp",
       "bbox": [820, 300, 950, 900],
       "layer_index": 3
     },
     {
-      "region_prompt": "a plant",
+      "region_prompt": "exactly one plant",
       "bbox": [640, 250, 790, 620],
       "layer_index": 4
     }
