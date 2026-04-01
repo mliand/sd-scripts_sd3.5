@@ -1038,6 +1038,9 @@ def run_layerbind_forward(
                         _, background_bg_freqs = transformer.select_token_subset(
                             x_tokens, local_context_indices, x_freqs_cis
                         )
+                        _, branch_bg_freqs = transformer.select_token_subset(
+                            x_tokens, region_state["indices"], x_freqs_cis
+                        )
                         background_segment_biases = build_layerbind_segment_logit_biases(
                             include_query_in_kv=True,
                             query_length=background_tokens.shape[1],
@@ -1048,7 +1051,7 @@ def run_layerbind_forward(
                             background_tokens,
                             background_bg_freqs,
                             context_states=[cap_tokens_current, region_state["branch_tokens"]],
-                            context_freqs_cis=[cap_freqs_current, branch_freqs],
+                            context_freqs_cis=[cap_freqs_current, branch_bg_freqs],
                             adaln_input=adaln_input,
                             include_query_in_kv=True,
                             segment_logit_biases=background_segment_biases,
