@@ -29,6 +29,26 @@
 ### 2026-04-01 / `pending`
 
 - 背景问题：
+  - 当前 `reverse adaptation` 虽然已经改成了 `buffered residuals`，但实际写回目标仍是整片 `local_context_indices`。
+  - 这意味着 residual 仍会作用到大范围纯背景 token，而不只是实例周围真正需要“让位”和“消缝”的局部背景。
+  - 在 Z-Image 的 unified self-attention 下，这种大范围背景改写更容易带来背景统计漂移，和用户观察到的“背景不稳、局部发灰”一致。
+- 改动点：
+  - 新增 `build_layerbind_reverse_adaptation_indices(...)`，为每个 region 构造仅围绕 bbox 的局部背景 ring。
+  - `Phase1` hard-binding 层中的 reverse adaptation residual 现在只累积到这组局部 ring token，而不再覆盖整片 sparse background context。
+  - 其他 region 的 token 仍会被显式排除，避免 residual 跨 region 写脏。
+- 预期收益：
+  - 让 reverse adaptation 更接近论文里“实例附近背景让位”的作用方式，而不是全局背景整体漂移。
+  - 降低主体发灰、背景不稳、副作用外溢的问题。
+- 已知风险：
+  - 当前 ring 仍是 bbox 邻域几何近似，不是真实语义边界。
+  - 若 radius 过小，主体边界附近的背景让位可能不够；过大则又会重新扩大副作用范围。
+- 验证方式/结果：
+  - 本地 `py_compile` 校验。
+  - 待用户实机验证主体灰度与背景稳定性是否改善。
+
+### 2026-04-01 / `pending`
+
+- 背景问题：
   - 当前女孩和猫虽然位置正确、主体成形，但主体表面仍带一点低饱和、发暗、残噪的质感。
   - 对照论文 `4.2 Hard Binding and Reverse Adaptation` 后发现，当前实现虽然计算了 hard-binding 层中的 `adapted_background`，但它只被作为局部变量参与 region text 更新，没有真正写回全局 image token。
   - 这会导致论文中“背景给主体腾位置、并与主体保持 seamless blend”的 reverse adaptation 没有真正发生在 global path 上。
