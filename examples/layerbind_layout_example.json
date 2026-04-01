@@ -1,7 +1,7 @@
 {
   "background_prompt": "a cozy modern living room interior, warm daylight from large windows, oak wood floor, cream walls, soft natural shadows, clean Scandinavian interior design, magazine illustration quality",
-  "scene_prompt": "a detailed interior design illustration of a cozy modern living room, balanced composition, warm daylight, clean Scandinavian style, a sofa on the left, a table in the center, a lamp on the right, and a plant in the back corner, cohesive materials, realistic proportions, refined decor rendering",
-  "negative_prompt": "bad quality, blurry, ugly, unclear, dirty, bad structure, duplicate furniture, mixed objects, floating objects, deformed, messy composition, cluttered room, broken perspective",
+  "scene_prompt": "a detailed interior design illustration of a cozy modern living room, balanced composition, warm daylight, clean Scandinavian style, cohesive materials, realistic perspective, refined decor rendering",
+  "negative_prompt": "bad quality, blurry, ugly, unclear, dirty, bad structure, duplicate furniture, mixed objects, misplaced objects, object leakage, floating objects, deformed, messy composition, cluttered room, broken perspective",
   "config": {
     "eta1": 0.25,
     "eta2": 0.7,
