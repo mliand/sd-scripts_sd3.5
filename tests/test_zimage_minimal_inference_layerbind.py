@@ -180,19 +180,6 @@ def test_build_layerbind_local_context_indices_returns_full_global_context():
     assert torch.equal(indices, torch.tensor([0, 2, 4, 5], dtype=torch.long))
 
 
-def test_build_layerbind_reverse_adaptation_indices_limits_to_local_background_ring():
-    indices = zimage_minimal_inference.build_layerbind_reverse_adaptation_indices(
-        region_indices=torch.tensor([5, 6, 9, 10], dtype=torch.long),
-        token_shape=(1, 4, 4),
-        seq_len=16,
-        device=torch.device("cpu"),
-        forbidden_indices=torch.tensor([0, 1, 2], dtype=torch.long),
-        radius=1,
-    )
-
-    assert torch.equal(indices, torch.tensor([4, 7, 8, 11, 12, 13, 14], dtype=torch.long))
-
-
 def test_prepare_layerbind_layout_keeps_overlap_tokens_for_all_layers(tmp_path):
     layout_path = tmp_path / "layout_overlap.json"
     layout_path.write_text(

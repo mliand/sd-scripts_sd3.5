@@ -27,8 +27,6 @@ LAYERBIND_PHASE2_TEXT_UPDATE_SCALE = 0.35
 LAYERBIND_PHASE2_DELTA_ALPHA_POWER = 1.5
 LAYERBIND_PHASE2_QUERY_ALPHA_THRESHOLD = 0.35
 LAYERBIND_PHASE2_QUERY_MIN_FRACTION = 0.15
-LAYERBIND_PHASE1_REVERSE_ADAPTATION_RADIUS = 2
-LAYERBIND_PHASE1_REVERSE_ADAPTATION_SCALE = 0.20
 
 
 def parse_layer_spec(text: str):
@@ -347,7 +345,6 @@ def prepare_region_runtime_states(layout, x_seq_len: int, device: torch.device):
                 "indices": indices,
                 "background_indices": background_indices,
                 "foreign_region_indices": foreign_region_indices,
-                "reverse_adaptation_indices": None,
                 "is_occluding_hint": is_occluding_hint,
                 "branch_patches": None,
                 "branch_tokens": None,
@@ -379,42 +376,6 @@ def build_layerbind_local_context_indices(
     # pruning, handle inter-layer visibility.
     del token_shape, forbidden_indices, radius, global_anchor_count
     return all_indices[~region_mask]
-
-
-def build_layerbind_reverse_adaptation_indices(
-    region_indices: torch.Tensor,
-    token_shape: tuple[int, int, int],
-    seq_len: int,
-    device: torch.device,
-    forbidden_indices: Optional[torch.Tensor] = None,
-    radius: int = LAYERBIND_PHASE1_REVERSE_ADAPTATION_RADIUS,
-) -> torch.Tensor:
-    if region_indices.numel() == 0:
-        return torch.zeros((0,), device=device, dtype=torch.long)
-
-    _, token_height, token_width = token_shape
-    indices = region_indices.to(device=device, dtype=torch.long)
-    y = torch.div(indices, token_width, rounding_mode="floor")
-    x = indices.remainder(token_width)
-    x1 = max(0, int(x.min().item()) - int(radius))
-    x2 = min(token_width, int(x.max().item()) + 1 + int(radius))
-    y1 = max(0, int(y.min().item()) - int(radius))
-    y2 = min(token_height, int(y.max().item()) + 1 + int(radius))
-
-    ys = torch.arange(y1, y2, device=device, dtype=torch.long)
-    xs = torch.arange(x1, x2, device=device, dtype=torch.long)
-    grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
-    local_indices = (grid_y * token_width + grid_x).reshape(-1)
-
-    keep_mask = torch.ones(local_indices.shape[0], device=device, dtype=torch.bool)
-    region_mask = torch.zeros(seq_len, device=device, dtype=torch.bool)
-    region_mask[indices] = True
-    keep_mask &= ~region_mask.index_select(0, local_indices)
-    if forbidden_indices is not None and forbidden_indices.numel() > 0:
-        forbidden_mask = torch.zeros(seq_len, device=device, dtype=torch.bool)
-        forbidden_mask[forbidden_indices.to(device=device, dtype=torch.long)] = True
-        keep_mask &= ~forbidden_mask.index_select(0, local_indices)
-    return local_indices[keep_mask]
 
 
 def build_layerbind_segment_logit_biases(
@@ -957,15 +918,6 @@ def run_layerbind_forward(
                 global_anchor_count=64,
             )
             region_state["context_seq_len"] = x_meta["seq_len"]
-        if cached_seq_len != x_meta["seq_len"] or region_state.get("reverse_adaptation_indices") is None:
-            region_state["reverse_adaptation_indices"] = build_layerbind_reverse_adaptation_indices(
-                region_state["indices"],
-                token_shape=x_meta["token_shape"],
-                seq_len=x_meta["seq_len"],
-                device=x_tokens.device,
-                forbidden_indices=region_state.get("foreign_region_indices"),
-                radius=LAYERBIND_PHASE1_REVERSE_ADAPTATION_RADIUS,
-            )
         region_state["token_shape"] = x_meta["token_shape"]
 
     if phase == "phase1":
@@ -1080,22 +1032,11 @@ def run_layerbind_forward(
                             include_query_in_kv=True,
                             segment_logit_biases=background_segment_biases,
                         )
-                        reverse_adaptation_indices = region_state.get("reverse_adaptation_indices")
-                        if reverse_adaptation_indices is not None and reverse_adaptation_indices.numel() > 0:
-                            write_mask = torch.isin(local_context_indices, reverse_adaptation_indices)
-                            write_positions = torch.nonzero(write_mask, as_tuple=False).flatten()
-                            if write_positions.numel() > 0:
-                                current_background = x_tokens.index_select(1, reverse_adaptation_indices)
-                                adapted_subset = adapted_background.index_select(1, write_positions).to(dtype=current_background.dtype)
-                                blended_background = current_background.lerp(
-                                    adapted_subset,
-                                    float(LAYERBIND_PHASE1_REVERSE_ADAPTATION_SCALE),
-                                )
-                                x_tokens = transformer.replace_token_subset(
-                                    x_tokens,
-                                    reverse_adaptation_indices,
-                                    blended_background.to(dtype=x_tokens.dtype),
-                                )
+                        x_tokens = transformer.replace_token_subset(
+                            x_tokens,
+                            local_context_indices,
+                            adapted_background.to(dtype=x_tokens.dtype),
+                        )
                         local_background_tokens = adapted_background
                         local_background_freqs = background_freqs
                 else:
