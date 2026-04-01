@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 init_ipex()
 
-LAYERBIND_PHASE2_TEXT_UPDATE_SCALE = 0.0
+LAYERBIND_PHASE2_TEXT_UPDATE_SCALE = 0.35
 LAYERBIND_PHASE2_DELTA_ALPHA_POWER = 1.5
 LAYERBIND_PHASE2_QUERY_ALPHA_THRESHOLD = 0.35
 LAYERBIND_PHASE2_QUERY_MIN_FRACTION = 0.15
@@ -439,8 +439,6 @@ def build_layerbind_segment_logit_biases(
             bias += 1.0
         elif role == "text_anchor":
             bias += 1.25
-        elif role == "phase2_text_anchor":
-            bias += 1.55
         elif role == "phase1_text_anchor":
             bias += 1.15
         elif role == "scene_text":
@@ -1214,7 +1212,7 @@ def run_layerbind_forward(
                         region_state["text_tokens"].shape[1],
                         global_x_tokens.shape[1],
                     ],
-                    context_roles=["phase2_text_anchor", "local_global"],
+                    context_roles=["text_anchor", "local_global"],
                 )
                 local_token_logit_bias = build_layerbind_phase2_token_logit_bias(
                     region_state["indices"],
