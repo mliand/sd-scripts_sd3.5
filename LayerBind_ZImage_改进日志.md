@@ -118,6 +118,33 @@
 - 验证方式/结果：
   - 待用户实机验证 mask 形状和最终图像表现。
 
+### 2026-04-01 / `pending`
+
+- 背景问题：
+  - 第一版 `counterfactual text-delta` 只让 mask 比之前更平滑了一些，但没有根本消除“块状轮廓”。
+  - 这说明问题不只在前景主信号来源，而在当前单一 mask 同时承担了两类互相冲突的职责：
+    - `support`：稳定选出可安全写回的主前景区域
+    - `boundary`：提供贴近真实轮廓的柔和边界 alpha
+  - 在 token-space + 强连通域约束下，如果两者共用一个 mask，最终一定会退化成保守的块状 support。
+- 改动点：
+  - 将 `t1` alpha 结构拆成 `support / boundary` 两部分：
+    - `support mask` 仍由当前 `core-first + dominant component` 路径负责，保证拓扑稳定
+    - 新增 `build_support_guided_soft_alpha`
+      - 以原始 alpha 分数为主
+      - 以 support 的 dilated/eroded 几何带为辅
+      - interior 保持高置信
+      - boundary band 使用 `raw alpha + smoothed support` 生成软边界
+  - 当前 `estimate_alpha_from_token_difference` 输出的 soft alpha 不再直接等于二值 support 裁切后的结果，而是 support-guided boundary alpha。
+  - 新增测试：验证 soft alpha 会把 support interior 与 boundary 区分开，而不是退化成整块硬 mask。
+- 预期收益：
+  - 保留当前 `t1` 无色块、主连通域稳定的优点。
+  - 减少 alpha 在视觉上过于接近长方块 support 的问题，让边界更接近真实主体轮廓。
+- 已知风险：
+  - 若 boundary band 过宽，可能重新把 support 外的噪声带回融合。
+  - 在低分辨率 token 网格下，轮廓改善幅度仍然会受到 `16x16` token 粒度上限限制。
+- 验证方式/结果：
+  - 待用户实机验证 soft alpha 是否比之前更接近真实轮廓，同时不引回色块。
+
 ### 2026-03-31 / `pending`
 
 - 背景问题：

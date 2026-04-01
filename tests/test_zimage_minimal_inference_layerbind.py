@@ -549,6 +549,49 @@ def test_refine_alpha_mask_with_region_core_keeps_center_connected_component():
     assert refined_alpha[0, 0, 2, 0].item() == 0.0
 
 
+def test_build_support_guided_soft_alpha_separates_support_and_boundary():
+    alpha_map = torch.tensor(
+        [
+            [
+                [
+                    [0.0, 0.1, 0.1, 0.1, 0.0],
+                    [0.1, 0.4, 0.5, 0.4, 0.1],
+                    [0.1, 0.5, 1.0, 0.5, 0.1],
+                    [0.1, 0.4, 0.5, 0.4, 0.1],
+                    [0.0, 0.1, 0.1, 0.1, 0.0],
+                ]
+            ]
+        ],
+        dtype=torch.float32,
+    )
+    support_mask = torch.tensor(
+        [
+            [
+                [
+                    [0.0, 0.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 1.0, 1.0, 0.0],
+                    [0.0, 1.0, 1.0, 1.0, 0.0],
+                    [0.0, 1.0, 1.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 0.0, 0.0],
+                ]
+            ]
+        ],
+        dtype=torch.float32,
+    )
+    region_mask = torch.ones_like(support_mask)
+
+    soft_alpha = zimage_minimal_inference.zimage_layerbind_utils.build_support_guided_soft_alpha(
+        alpha_map,
+        support_mask,
+        region_mask,
+        poisson_lambda=0.5,
+    )
+
+    assert soft_alpha[0, 0, 2, 2].item() > 0.95
+    assert soft_alpha[0, 0, 1, 2].item() > 0.2
+    assert soft_alpha[0, 0, 0, 0].item() == 0.0
+
+
 def test_phase1_resets_region_text_tokens_from_prompt_each_timestep(monkeypatch):
     transformer = create_tiny_zimage_model()
     device = torch.device("cpu")
