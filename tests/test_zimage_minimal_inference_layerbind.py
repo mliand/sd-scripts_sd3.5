@@ -437,45 +437,6 @@ def test_phase1_blend_preserves_global_background_for_bottom_layers_in_alpha_mod
     assert abs(region_states[0]["region_mask"][0, 0, 0].item() - 0.0) < 1e-6
 
 
-def test_phase1_blend_prefers_counterfactual_branch_tokens_for_mask_signal(monkeypatch):
-    x_tokens = torch.tensor([[[5.0]]])
-    captured = {}
-
-    def fake_estimate(branch_tokens, current_tokens, *args, **kwargs):
-        captured["branch_tokens"] = branch_tokens.clone()
-        captured["current_tokens"] = current_tokens.clone()
-        return torch.tensor([[[0.25]]]), torch.tensor([[[1.0]]])
-
-    region_states = [
-        {
-            "layer_index": 2,
-            "indices": torch.tensor([0], dtype=torch.long),
-            "branch_tokens": torch.tensor([[[9.0]]]),
-            "counterfactual_branch_tokens": torch.tensor([[[3.0]]]),
-            "alpha_mask": None,
-        }
-    ]
-
-    monkeypatch.setattr(
-        zimage_minimal_inference.zimage_layerbind_utils,
-        "estimate_alpha_from_token_difference",
-        fake_estimate,
-    )
-
-    zimage_minimal_inference.blend_region_tokens(
-        x_tokens,
-        region_states,
-        beta=0.7,
-        blend_mode="alpha",
-        token_shape=(1, 1, 1),
-        gamma=0.9,
-        poisson_lambda=0.5,
-    )
-
-    assert torch.allclose(captured["branch_tokens"], torch.tensor([[[9.0]]]))
-    assert torch.allclose(captured["current_tokens"], torch.tensor([[[3.0]]]))
-
-
 def test_phase2_composition_uses_beta_times_binary_mask_once():
     x_tokens = torch.zeros(1, 2, 1)
     local_tokens = torch.tensor([[[10.0], [10.0]]])
@@ -547,49 +508,6 @@ def test_refine_alpha_mask_with_region_core_keeps_center_connected_component():
     assert refined_binary[0, 0, 1, 2].item() == 1.0
     assert refined_binary[0, 0, 2, 0].item() == 0.0
     assert refined_alpha[0, 0, 2, 0].item() == 0.0
-
-
-def test_build_support_guided_soft_alpha_separates_support_and_boundary():
-    alpha_map = torch.tensor(
-        [
-            [
-                [
-                    [0.0, 0.1, 0.1, 0.1, 0.0],
-                    [0.1, 0.4, 0.5, 0.4, 0.1],
-                    [0.1, 0.5, 1.0, 0.5, 0.1],
-                    [0.1, 0.4, 0.5, 0.4, 0.1],
-                    [0.0, 0.1, 0.1, 0.1, 0.0],
-                ]
-            ]
-        ],
-        dtype=torch.float32,
-    )
-    support_mask = torch.tensor(
-        [
-            [
-                [
-                    [0.0, 0.0, 0.0, 0.0, 0.0],
-                    [0.0, 1.0, 1.0, 1.0, 0.0],
-                    [0.0, 1.0, 1.0, 1.0, 0.0],
-                    [0.0, 1.0, 1.0, 1.0, 0.0],
-                    [0.0, 0.0, 0.0, 0.0, 0.0],
-                ]
-            ]
-        ],
-        dtype=torch.float32,
-    )
-    region_mask = torch.ones_like(support_mask)
-
-    soft_alpha = zimage_minimal_inference.zimage_layerbind_utils.build_support_guided_soft_alpha(
-        alpha_map,
-        support_mask,
-        region_mask,
-        poisson_lambda=0.5,
-    )
-
-    assert soft_alpha[0, 0, 2, 2].item() > 0.95
-    assert soft_alpha[0, 0, 1, 2].item() > 0.2
-    assert soft_alpha[0, 0, 0, 0].item() == 0.0
 
 
 def test_phase1_resets_region_text_tokens_from_prompt_each_timestep(monkeypatch):

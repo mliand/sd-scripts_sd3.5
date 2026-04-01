@@ -348,8 +348,6 @@ def prepare_region_runtime_states(layout, x_seq_len: int, device: torch.device):
                 "is_occluding_hint": is_occluding_hint,
                 "branch_patches": None,
                 "branch_tokens": None,
-                "counterfactual_branch_patches": None,
-                "counterfactual_branch_tokens": None,
                 "text_tokens": None,
                 "region_mask": region_mask,
                 "alpha_mask": None,
@@ -654,14 +652,11 @@ def blend_region_tokens(
 
     for region_state, is_occluding in zip(sorted_states, occluding_flags):
         branch_tokens = region_state.get("branch_tokens")
-        reference_tokens = region_state.get("counterfactual_branch_tokens")
         indices = region_state["indices"]
         if branch_tokens is None or indices.numel() == 0:
             continue
 
         current = blended.index_select(1, indices)
-        if reference_tokens is None or reference_tokens.shape != branch_tokens.shape:
-            reference_tokens = current
         is_occluding = bool(region_state.get("is_occluding_hint", False)) or is_occluding
         region_state["is_occluding"] = is_occluding
         if blend_mode == "direct" or not is_occluding:
@@ -671,7 +666,7 @@ def blend_region_tokens(
             else:
                 _alpha_mask, binary_mask = zimage_layerbind_utils.estimate_alpha_from_token_difference(
                     branch_tokens,
-                    reference_tokens,
+                    current,
                     indices,
                     token_shape=token_shape,
                     gamma=gamma,
@@ -687,7 +682,7 @@ def blend_region_tokens(
         else:
             alpha_mask, binary_mask = zimage_layerbind_utils.estimate_alpha_from_token_difference(
                 branch_tokens,
-                reference_tokens,
+                current,
                 indices,
                 token_shape=token_shape,
                 gamma=gamma,
@@ -941,25 +936,9 @@ def run_layerbind_forward(
             if region_state["branch_patches"] is None or region_state["branch_patches"].shape != branch_seed.shape:
                 # Phase 1 starts from the same latent noise patches as the global path, then evolves independently.
                 region_state["branch_patches"] = branch_seed.clone()
-            if (
-                region_state.get("counterfactual_branch_patches") is None
-                or region_state["counterfactual_branch_patches"].shape != branch_seed.shape
-            ):
-                # Counterfactual branch shares the same initial noise, but evolves without
-                # region text so we can estimate which tokens are actually driven by the
-                # regional prompt rather than generic local drift.
-                region_state["counterfactual_branch_patches"] = branch_seed.clone()
             region_state["branch_tokens"] = prepare_branch_image_tokens(
                 transformer,
                 region_state["branch_patches"],
-                branch_freqs,
-                adaln_input,
-                patch_size=x_meta["patch_size"],
-                f_patch_size=x_meta["f_patch_size"],
-            )
-            region_state["counterfactual_branch_tokens"] = prepare_branch_image_tokens(
-                transformer,
-                region_state["counterfactual_branch_patches"],
                 branch_freqs,
                 adaln_input,
                 patch_size=x_meta["patch_size"],
@@ -1055,29 +1034,6 @@ def run_layerbind_forward(
                         )
                         local_background_tokens = adapted_background
                         local_background_freqs = background_freqs
-
-                    counterfactual_context_states = []
-                    counterfactual_context_freqs = []
-                    counterfactual_context_roles = []
-                    if background_tokens.shape[1] > 0:
-                        counterfactual_context_states.append(background_tokens)
-                        counterfactual_context_freqs.append(background_freqs)
-                        counterfactual_context_roles.append("local_global")
-                    counterfactual_segment_biases = build_layerbind_segment_logit_biases(
-                        include_query_in_kv=True,
-                        query_length=region_state["counterfactual_branch_tokens"].shape[1],
-                        context_lengths=[context.shape[1] for context in counterfactual_context_states],
-                        context_roles=counterfactual_context_roles,
-                    )
-                    region_state["counterfactual_branch_tokens"] = layer.contextual_forward(
-                        region_state["counterfactual_branch_tokens"],
-                        branch_freqs,
-                        context_states=counterfactual_context_states if counterfactual_context_states else None,
-                        context_freqs_cis=counterfactual_context_freqs if counterfactual_context_freqs else None,
-                        adaln_input=adaln_input,
-                        include_query_in_kv=True,
-                        segment_logit_biases=counterfactual_segment_biases,
-                    )
                 else:
                     branch_segment_biases = build_layerbind_segment_logit_biases(
                         include_query_in_kv=False,
@@ -1094,37 +1050,6 @@ def run_layerbind_forward(
                         include_query_in_kv=False,
                         segment_logit_biases=branch_segment_biases,
                     )
-                    if background_tokens.shape[1] > 0:
-                        counterfactual_segment_biases = build_layerbind_segment_logit_biases(
-                            include_query_in_kv=False,
-                            query_length=region_state["counterfactual_branch_tokens"].shape[1],
-                            context_lengths=[background_tokens.shape[1]],
-                            context_roles=["phase1_local_global_sparse"],
-                        )
-                        region_state["counterfactual_branch_tokens"] = layer.contextual_forward(
-                            region_state["counterfactual_branch_tokens"],
-                            branch_freqs,
-                            context_states=[background_tokens],
-                            context_freqs_cis=[background_freqs],
-                            adaln_input=adaln_input,
-                            include_query_in_kv=False,
-                            segment_logit_biases=counterfactual_segment_biases,
-                        )
-                    else:
-                        region_state["counterfactual_branch_tokens"] = layer.contextual_forward(
-                            region_state["counterfactual_branch_tokens"],
-                            branch_freqs,
-                            context_states=None,
-                            context_freqs_cis=None,
-                            adaln_input=adaln_input,
-                            include_query_in_kv=True,
-                            segment_logit_biases=build_layerbind_segment_logit_biases(
-                                include_query_in_kv=True,
-                                query_length=region_state["counterfactual_branch_tokens"].shape[1],
-                                context_lengths=[],
-                                context_roles=[],
-                            ),
-                        )
                 region_state["alpha_mask"] = None
                 text_include_query = include_query_in_kv
                 text_segment_biases = build_layerbind_segment_logit_biases(
@@ -1256,23 +1181,6 @@ def run_layerbind_forward(
             region_state["branch_patches"] = zimage_train_utils._step(
                 (-branch_patch_residual).to(torch.float32),
                 branch_patches.to(torch.float32),
-                sigmas,
-                step_index,
-            )
-            counterfactual_branch_tokens = region_state.get("counterfactual_branch_tokens")
-            counterfactual_branch_patches = region_state.get("counterfactual_branch_patches")
-            if counterfactual_branch_tokens is None or counterfactual_branch_patches is None:
-                continue
-            counterfactual_patch_residual = predict_branch_patch_residual(
-                transformer,
-                counterfactual_branch_tokens,
-                adaln_input,
-                patch_size=x_meta["patch_size"],
-                f_patch_size=x_meta["f_patch_size"],
-            )
-            region_state["counterfactual_branch_patches"] = zimage_train_utils._step(
-                (-counterfactual_patch_residual).to(torch.float32),
-                counterfactual_branch_patches.to(torch.float32),
                 sigmas,
                 step_index,
             )

@@ -426,39 +426,6 @@ def refine_alpha_mask_with_region_core(
     return refined_alpha, refined_binary
 
 
-def build_support_guided_soft_alpha(
-    alpha_map: torch.Tensor,
-    support_mask: torch.Tensor,
-    region_mask: torch.Tensor,
-    poisson_lambda: float = 0.50,
-) -> torch.Tensor:
-    normalized_alpha = alpha_map / alpha_map.amax(dim=(-1, -2), keepdim=True).clamp(min=1e-6)
-    support_mask = (support_mask > 0).to(dtype=alpha_map.dtype)
-    region_mask = (region_mask > 0).to(dtype=alpha_map.dtype)
-
-    support_dilated = _binary_dilate(support_mask, iterations=1) * region_mask
-    support_eroded = _binary_erode(support_mask, iterations=1) * support_mask
-    boundary_band = (support_dilated - support_eroded).clamp(min=0.0) * region_mask
-
-    smoothed_support = _screened_poisson_smooth(
-        support_dilated.to(dtype=alpha_map.dtype),
-        poisson_lambda=max(float(poisson_lambda), 1.0),
-        num_iters=12,
-    )
-    smoothed_support = smoothed_support * support_dilated
-    smoothed_support = smoothed_support / smoothed_support.amax(dim=(-1, -2), keepdim=True).clamp(min=1e-6)
-
-    # Separate support from boundary:
-    # - interior support remains high-confidence writeback area
-    # - the boundary band follows the raw alpha score to preserve a more natural outline
-    #   instead of collapsing the whole region into a single hard blob.
-    interior_alpha = support_eroded
-    boundary_alpha = (0.35 * smoothed_support + 0.65 * normalized_alpha) * boundary_band
-    soft_alpha = torch.maximum(interior_alpha, boundary_alpha)
-    soft_alpha = soft_alpha * support_dilated
-    return soft_alpha.clamp_(0.0, 1.0)
-
-
 def estimate_alpha_from_token_difference(
     branch_tokens: torch.Tensor,
     current_tokens: torch.Tensor,
@@ -529,16 +496,11 @@ def estimate_alpha_from_token_difference(
                 token_indices,
                 token_shape,
             )
-        soft_alpha = build_support_guided_soft_alpha(
-            refined,
-            binary,
-            region_mask,
-            poisson_lambda=poisson_lambda,
-        )
-        if soft_alpha.amax().item() <= 1e-6:
-            soft_alpha = refined * binary
-        soft_alpha = soft_alpha / soft_alpha.amax().clamp(min=1e-6)
-        alpha_tokens.append(soft_alpha.view(-1)[flat_region_mask])
+        refined = refined * binary
+        if refined.amax().item() <= 1e-6:
+            refined = alpha_map[batch_index : batch_index + 1]
+        refined = refined / refined.amax().clamp(min=1e-6)
+        alpha_tokens.append(refined.view(-1)[flat_region_mask])
         binary_tokens.append(binary.view(-1)[flat_region_mask])
 
     alpha = torch.stack(alpha_tokens, dim=0).to(dtype=branch_tokens.dtype, device=branch_tokens.device)
