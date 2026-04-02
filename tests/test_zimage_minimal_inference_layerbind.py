@@ -110,6 +110,8 @@ def test_build_prompts_includes_layerbind_fields():
         layerbind_collect_layer_stats=True,
         layerbind_layer_stats_path="layer_stats.json",
         layerbind_layer_stats_top_k=7,
+        layerbind_collect_signal_probes=True,
+        layerbind_signal_probe_path="signal_probes.json",
     )
 
     prompts = zimage_minimal_inference.build_prompts(args)
@@ -120,6 +122,8 @@ def test_build_prompts_includes_layerbind_fields():
     assert prompts[0]["layerbind_collect_layer_stats"] is True
     assert prompts[0]["layerbind_layer_stats_path"] == "layer_stats.json"
     assert prompts[0]["layerbind_layer_stats_top_k"] == 7
+    assert prompts[0]["layerbind_collect_signal_probes"] is True
+    assert prompts[0]["layerbind_signal_probe_path"] == "signal_probes.json"
 
 
 def test_create_image_freqs_for_caption_length_matches_requested_offset():
@@ -331,6 +335,37 @@ def test_finalize_layerbind_layer_stats_suggests_text_dominant_layers():
     summary = zimage_minimal_inference.finalize_layerbind_layer_stats(accumulator)
 
     assert summary["suggested_hard_binding_layers"] == [0, 2, 3]
+
+
+def test_finalize_layerbind_signal_probe_aggregates_fg_bg_metrics():
+    accumulator = {
+        "layout_scene_prompt": "scene",
+        "layout_background_prompt": "background",
+        "regions": [{"region_id": 1, "region_prompt": "mouse"}],
+        "entries": [
+            {
+                "region_id": 1,
+                "region_prompt": "mouse",
+                "fg_token_count": 2,
+                "bg_token_count": 2,
+                "d_fg": 4.0,
+                "d_bg": 1.0,
+                "s_fg_proxy": 3.0,
+                "s_fg_token_count": 2,
+                "s_bg_proxy": 1.5,
+                "s_bg_token_count": 2,
+            }
+        ],
+    }
+
+    summary = zimage_minimal_inference.finalize_layerbind_signal_probe(accumulator)
+
+    assert summary["global"]["d_fg"] == 4.0
+    assert summary["global"]["d_bg"] == 1.0
+    assert summary["global"]["d_fg_over_bg"] == 4.0
+    assert summary["global"]["s_fg_proxy"] == 3.0
+    assert summary["global"]["s_bg_proxy"] == 1.5
+    assert summary["global"]["s_bg_over_fg"] == 0.5
 
 
 def test_get_layerbind_debug_save_points_uses_requested_percents():

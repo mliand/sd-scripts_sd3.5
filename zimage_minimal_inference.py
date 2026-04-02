@@ -100,6 +100,17 @@ def add_layerbind_arguments(parser: argparse.ArgumentParser):
         default=None,
         help="number of hard-binding layers to recommend when saving layer-search statistics",
     )
+    parser.add_argument(
+        "--layerbind_collect_signal_probes",
+        action="store_true",
+        help="collect t1 signal probes for branch-global diff cleanliness and text leakage",
+    )
+    parser.add_argument(
+        "--layerbind_signal_probe_path",
+        type=str,
+        default=None,
+        help="optional path to save LayerBind signal probe JSON",
+    )
 
 
 def prepare_layerbind_layout(prompt_dict: dict[str, Any], width: int, height: int):
@@ -140,6 +151,8 @@ def build_single_prompt_dict(args: argparse.Namespace) -> dict[str, Any]:
         "layerbind_collect_layer_stats": args.layerbind_collect_layer_stats,
         "layerbind_layer_stats_path": args.layerbind_layer_stats_path,
         "layerbind_layer_stats_top_k": args.layerbind_layer_stats_top_k,
+        "layerbind_collect_signal_probes": args.layerbind_collect_signal_probes,
+        "layerbind_signal_probe_path": args.layerbind_signal_probe_path,
     }
 
 
@@ -159,6 +172,8 @@ def build_prompts(args: argparse.Namespace):
         prompt.setdefault("layerbind_collect_layer_stats", args.layerbind_collect_layer_stats)
         prompt.setdefault("layerbind_layer_stats_path", args.layerbind_layer_stats_path)
         prompt.setdefault("layerbind_layer_stats_top_k", args.layerbind_layer_stats_top_k)
+        prompt.setdefault("layerbind_collect_signal_probes", args.layerbind_collect_signal_probes)
+        prompt.setdefault("layerbind_signal_probe_path", args.layerbind_signal_probe_path)
     return prompts
 
 
@@ -321,7 +336,7 @@ def prepare_region_runtime_states(layout, x_seq_len: int, device: torch.device):
         per_region_indices.append(indices)
 
     states = []
-    for region, indices in zip(layout.regions, per_region_indices):
+    for region_index, (region, indices) in enumerate(zip(layout.regions, per_region_indices), start=1):
         keep_mask = torch.ones(x_seq_len, dtype=torch.bool, device=device)
         if indices.numel() > 0:
             keep_mask[indices] = False
@@ -342,6 +357,7 @@ def prepare_region_runtime_states(layout, x_seq_len: int, device: torch.device):
         region_mask = torch.ones((1, indices.numel(), 1), device=device, dtype=torch.float32)
         states.append(
             {
+                "region_id": region_index,
                 "layer_index": region.layer_index,
                 "bbox": region.bbox,
                 "prompt": region.region_prompt,
@@ -354,6 +370,7 @@ def prepare_region_runtime_states(layout, x_seq_len: int, device: torch.device):
                 "text_tokens": None,
                 "region_mask": region_mask,
                 "alpha_mask": None,
+                "probe_branch_tokens_no_text": None,
             }
         )
     return states
@@ -690,6 +707,145 @@ def finalize_layerbind_layer_stats(accumulator: Optional[dict[str, Any]]) -> Opt
     }
 
 
+def create_layerbind_signal_probe_accumulator(prompt_dict: dict[str, Any], layout) -> Optional[dict[str, Any]]:
+    if layout is None or not bool(prompt_dict.get("layerbind_collect_signal_probes", False)):
+        return None
+
+    return {
+        "layout_scene_prompt": layout.scene_prompt,
+        "layout_background_prompt": layout.background_prompt,
+        "regions": [
+            {
+                "region_id": region_index,
+                "layer_index": region.layer_index,
+                "bbox": list(region.bbox),
+                "token_count": len(region.token_indices),
+                "region_prompt": region.region_prompt,
+            }
+            for region_index, region in enumerate(layout.regions, start=1)
+        ],
+        "entries": [],
+    }
+
+
+def _masked_token_mean(values: torch.Tensor, mask: torch.Tensor) -> tuple[float, int]:
+    if values.ndim != 2 or mask.ndim != 2:
+        raise ValueError(f"Expected [B, N] tensors, got {tuple(values.shape)} and {tuple(mask.shape)}")
+    mask = mask.to(dtype=torch.bool)
+    count = int(mask.sum().item())
+    if count <= 0:
+        return 0.0, 0
+    mean = values.masked_select(mask).to(dtype=torch.float32).mean().item()
+    return float(mean), count
+
+
+def record_layerbind_signal_probe(
+    accumulator: Optional[dict[str, Any]],
+    region_state: dict[str, Any],
+    branch_tokens: torch.Tensor,
+    current_tokens: torch.Tensor,
+    binary_mask: torch.Tensor,
+    branch_tokens_no_text: Optional[torch.Tensor] = None,
+):
+    if accumulator is None:
+        return
+    if branch_tokens.shape != current_tokens.shape:
+        return
+    if binary_mask.ndim != 3 or binary_mask.shape[:2] != branch_tokens.shape[:2]:
+        return
+
+    fg_mask = binary_mask.squeeze(-1) > 0.5
+    bg_mask = ~fg_mask
+    branch_global_diff = torch.linalg.vector_norm(branch_tokens - current_tokens, dim=-1)
+
+    d_fg, fg_count = _masked_token_mean(branch_global_diff, fg_mask)
+    d_bg, bg_count = _masked_token_mean(branch_global_diff, bg_mask)
+
+    entry = {
+        "region_id": int(region_state.get("region_id", 0)),
+        "layer_index": int(region_state.get("layer_index", 0)),
+        "region_prompt": region_state.get("prompt", ""),
+        "is_occluding": bool(region_state.get("is_occluding", False)),
+        "fg_token_count": fg_count,
+        "bg_token_count": bg_count,
+        "d_fg": d_fg,
+        "d_bg": d_bg,
+        "d_fg_over_bg": d_fg / max(d_bg, 1e-6) if fg_count > 0 and bg_count > 0 else 0.0,
+    }
+
+    if branch_tokens_no_text is not None and branch_tokens_no_text.shape == branch_tokens.shape:
+        text_effect = torch.linalg.vector_norm(branch_tokens - branch_tokens_no_text, dim=-1)
+        s_fg_proxy, s_fg_count = _masked_token_mean(text_effect, fg_mask)
+        s_bg_proxy, s_bg_count = _masked_token_mean(text_effect, bg_mask)
+        entry.update(
+            {
+                "s_fg_proxy": s_fg_proxy,
+                "s_fg_token_count": s_fg_count,
+                "s_bg_proxy": s_bg_proxy,
+                "s_bg_token_count": s_bg_count,
+                "s_bg_over_fg": s_bg_proxy / max(s_fg_proxy, 1e-6) if s_fg_count > 0 and s_bg_count > 0 else 0.0,
+            }
+        )
+
+    accumulator["entries"].append(entry)
+
+
+def finalize_layerbind_signal_probe(accumulator: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    if accumulator is None:
+        return None
+
+    entries = list(accumulator.get("entries", []))
+    if not entries:
+        return {
+            "layout_scene_prompt": accumulator.get("layout_scene_prompt", ""),
+            "layout_background_prompt": accumulator.get("layout_background_prompt", ""),
+            "regions": accumulator.get("regions", []),
+            "entries": [],
+            "global": {},
+            "notes": {
+                "d_bg_definition": "Mean ||branch - global|| on background-like tokens inside each region at t1, using the estimated binary mask complement.",
+                "s_bg_definition": "Finite-difference proxy: mean ||branch_with_text - branch_without_local_text|| on background-like tokens inside each region at t1.",
+            },
+        }
+
+    def weighted_mean(key: str, count_key: str) -> float:
+        total = 0.0
+        count = 0
+        for entry in entries:
+            c = int(entry.get(count_key, 0))
+            if c <= 0:
+                continue
+            total += float(entry.get(key, 0.0)) * c
+            count += c
+        return total / max(count, 1)
+
+    global_summary = {
+        "region_count": len(entries),
+        "d_fg": weighted_mean("d_fg", "fg_token_count"),
+        "d_bg": weighted_mean("d_bg", "bg_token_count"),
+    }
+    global_summary["d_fg_over_bg"] = global_summary["d_fg"] / max(global_summary["d_bg"], 1e-6)
+
+    has_s_proxy = any("s_bg_proxy" in entry for entry in entries)
+    if has_s_proxy:
+        global_summary["s_fg_proxy"] = weighted_mean("s_fg_proxy", "s_fg_token_count")
+        global_summary["s_bg_proxy"] = weighted_mean("s_bg_proxy", "s_bg_token_count")
+        global_summary["s_bg_over_fg"] = global_summary["s_bg_proxy"] / max(global_summary["s_fg_proxy"], 1e-6)
+
+    return {
+        "layout_scene_prompt": accumulator.get("layout_scene_prompt", ""),
+        "layout_background_prompt": accumulator.get("layout_background_prompt", ""),
+        "regions": accumulator.get("regions", []),
+        "entries": entries,
+        "global": global_summary,
+        "notes": {
+            "d_bg_definition": "Mean ||branch - global|| on background-like tokens inside each region at t1, using the estimated binary mask complement.",
+            "s_bg_definition": "Finite-difference proxy: mean ||branch_with_text - branch_without_local_text|| on background-like tokens inside each region at t1.",
+            "s_bg_proxy_null_text": "The no-text branch reuses the same branch seed and shared background context, but replaces the region text tokens with zeros during Phase 1 updates.",
+        },
+    }
+
+
 def resolve_layerbind_layer_stats_output_path(
     prompt_dict: dict[str, Any],
     output_dir: str,
@@ -707,6 +863,23 @@ def resolve_layerbind_layer_stats_output_path(
     return os.path.join(output_dir, f"{base_name}_{sample_steps:06d}_{index:02d}_{seed}_layer_stats.json")
 
 
+def resolve_layerbind_signal_probe_output_path(
+    prompt_dict: dict[str, Any],
+    output_dir: str,
+    output_name: Optional[str],
+    seed: int,
+    sample_steps: int,
+    index: int,
+):
+    custom_path = prompt_dict.get("layerbind_signal_probe_path")
+    if custom_path:
+        return custom_path
+
+    os.makedirs(output_dir, exist_ok=True)
+    base_name = output_name or "layerbind"
+    return os.path.join(output_dir, f"{base_name}_{sample_steps:06d}_{index:02d}_{seed}_signal_probes.json")
+
+
 def blend_region_tokens(
     x_tokens: torch.Tensor,
     region_states: list[dict[str, Any]],
@@ -715,6 +888,7 @@ def blend_region_tokens(
     token_shape: tuple[int, int, int],
     gamma: float,
     poisson_lambda: float,
+    signal_probe_accumulator: Optional[dict[str, Any]] = None,
 ):
     blended = x_tokens.clone()
     sorted_states = sorted(region_states, key=lambda item: item["layer_index"])
@@ -754,6 +928,14 @@ def blend_region_tokens(
                     core_first=True,
                 )
                 region_state["region_mask"] = binary_mask
+                record_layerbind_signal_probe(
+                    signal_probe_accumulator,
+                    region_state,
+                    branch_tokens,
+                    current,
+                    binary_mask,
+                    branch_tokens_no_text=region_state.get("probe_branch_tokens_no_text"),
+                )
                 # Preserve the shared global background for non-occluding layers and only
                 # write back the estimated foreground area from the branch.
                 update = binary_mask * branch_tokens + (1.0 - binary_mask) * current
@@ -771,6 +953,14 @@ def blend_region_tokens(
             )
             region_state["region_mask"] = binary_mask
             region_state["alpha_mask"] = alpha_mask
+            record_layerbind_signal_probe(
+                signal_probe_accumulator,
+                region_state,
+                branch_tokens,
+                current,
+                binary_mask,
+                branch_tokens_no_text=region_state.get("probe_branch_tokens_no_text"),
+            )
             update = alpha_mask * branch_tokens + (1.0 - alpha_mask) * current
 
         blended.index_copy_(1, indices, update)
@@ -960,6 +1150,7 @@ def run_layerbind_forward(
     phase2_delta_scale: float,
     apply_phase1_blend: bool,
     layer_stats_accumulator: Optional[dict[str, Any]] = None,
+    signal_probe_accumulator: Optional[dict[str, Any]] = None,
 ):
     active_condition = background_condition if phase == "phase1" else scene_condition
     cap_tokens = active_condition["tokens"]
@@ -1031,6 +1222,8 @@ def run_layerbind_forward(
                 patch_size=x_meta["patch_size"],
                 f_patch_size=x_meta["f_patch_size"],
             )
+            if signal_probe_accumulator is not None:
+                region_state["probe_branch_tokens_no_text"] = region_state["branch_tokens"].clone()
             # Re-anchor Phase 1 to the original region prompt every denoising step so
             # branch text semantics do not drift toward neighboring regions.
             region_state["text_tokens"] = region_condition["tokens"].clone()
@@ -1073,6 +1266,7 @@ def run_layerbind_forward(
                 local_background_tokens = background_tokens
                 local_background_freqs = background_freqs
                 include_query_in_kv = layer_idx in hard_binding_layers
+                zero_text_tokens = torch.zeros_like(region_state["text_tokens"]) if signal_probe_accumulator is not None else None
 
                 if layer_stats_accumulator is not None:
                     segment_names = ["self", "background", "text"] if include_query_in_kv else ["background", "text"]
@@ -1103,6 +1297,16 @@ def run_layerbind_forward(
                         include_query_in_kv=True,
                         segment_logit_biases=branch_segment_biases,
                     )
+                    if signal_probe_accumulator is not None and zero_text_tokens is not None:
+                        region_state["probe_branch_tokens_no_text"] = layer.contextual_forward(
+                            region_state["probe_branch_tokens_no_text"],
+                            branch_freqs,
+                            context_states=[zero_text_tokens],
+                            context_freqs_cis=[region_condition["freqs"]],
+                            adaln_input=adaln_input,
+                            include_query_in_kv=True,
+                            segment_logit_biases=branch_segment_biases,
+                        )
                     if background_tokens.shape[1] > 0:
                         _, background_bg_freqs = transformer.select_token_subset(
                             x_tokens, local_context_indices, x_freqs_cis
@@ -1155,6 +1359,16 @@ def run_layerbind_forward(
                         include_query_in_kv=False,
                         segment_logit_biases=branch_segment_biases,
                     )
+                    if signal_probe_accumulator is not None and zero_text_tokens is not None:
+                        region_state["probe_branch_tokens_no_text"] = layer.contextual_forward(
+                            region_state["probe_branch_tokens_no_text"],
+                            branch_freqs,
+                            context_states=[background_tokens, zero_text_tokens],
+                            context_freqs_cis=[background_freqs, region_condition["freqs"]],
+                            adaln_input=adaln_input,
+                            include_query_in_kv=False,
+                            segment_logit_biases=branch_segment_biases,
+                        )
                 region_state["alpha_mask"] = None
                 text_include_query = include_query_in_kv
                 text_segment_biases = build_layerbind_segment_logit_biases(
@@ -1285,6 +1499,7 @@ def run_layerbind_forward(
             token_shape=x_meta["token_shape"],
             gamma=gamma,
             poisson_lambda=poisson_lambda,
+            signal_probe_accumulator=signal_probe_accumulator,
         )
     elif phase == "phase1" and sigmas is not None:
         for region_state in region_states:
@@ -1432,6 +1647,7 @@ def generate_image(
     intermediate_dir = None
     debug_save_points = []
     layer_stats_accumulator = None
+    signal_probe_accumulator = None
     if use_layerbind:
         with torch.autocast(device_type=device.type, dtype=dtype), torch.no_grad():
             layerbind_conditions = prepare_layerbind_conditions(
@@ -1465,6 +1681,7 @@ def generate_image(
             blend_mode,
         )
         layer_stats_accumulator = create_layerbind_layer_stats_accumulator(transformer, prompt_dict, layerbind_layout)
+        signal_probe_accumulator = create_layerbind_signal_probe_accumulator(prompt_dict, layerbind_layout)
         if save_intermediates:
             intermediate_dir = os.path.join(output_dir, "layerbind_debug")
             os.makedirs(intermediate_dir, exist_ok=True)
@@ -1504,6 +1721,7 @@ def generate_image(
                     phase2_delta_scale=layerbind_layout.config.phase2_delta_scale,
                     apply_phase1_blend=phase == "phase1" and (i + 1) == t1_step,
                     layer_stats_accumulator=layer_stats_accumulator,
+                    signal_probe_accumulator=signal_probe_accumulator,
                 )
             else:
                 model_out = transformer(x=latent_model_input, t=timestep, cap_feats=prompt_embeds, cap_mask=prompt_mask)
@@ -1578,6 +1796,25 @@ def generate_image(
             "layerbind layer stats saved: %s suggested_hard_binding_layers=%s",
             layer_stats_path,
             layer_stats_summary["suggested_hard_binding_layers"],
+        )
+
+    signal_probe_summary = finalize_layerbind_signal_probe(signal_probe_accumulator)
+    if signal_probe_summary is not None:
+        signal_probe_path = resolve_layerbind_signal_probe_output_path(
+            prompt_dict,
+            output_dir=output_dir,
+            output_name=output_name,
+            seed=seed,
+            sample_steps=sample_steps,
+            index=index,
+        )
+        with open(signal_probe_path, "w", encoding="utf-8") as handle:
+            json.dump(signal_probe_summary, handle, indent=2, ensure_ascii=False)
+        logger.info(
+            "layerbind signal probes saved: %s d_fg_over_bg=%s s_bg_over_fg=%s",
+            signal_probe_path,
+            signal_probe_summary.get("global", {}).get("d_fg_over_bg"),
+            signal_probe_summary.get("global", {}).get("s_bg_over_fg"),
         )
 
 
