@@ -156,6 +156,30 @@ def import_magi_components():
     from inference.model.vae2_2.vae2_2_model import get_vae2_2
     from inference.pipeline.prompt_process import get_padded_t5_gemma_embedding
 
+    # Patch flash_attn fallback after dit_module is imported
+    try:
+        import flash_attn
+        logger.info("flash_attn is available, using FlashAttention-2")
+    except ImportError:
+        logger.warning("flash_attn not found, patching daVinci DiT to use PyTorch SDPA")
+        try:
+            from inference.model.dit import dit_module
+            import torch.nn.functional as F
+
+            def patched_flash_attn_func(q, k, v):
+                """Fallback to PyTorch SDPA when flash_attn is not available."""
+                q = q.transpose(1, 2)
+                k = k.transpose(1, 2)
+                v = v.transpose(1, 2)
+                attn_out = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False)
+                return attn_out.transpose(1, 2)
+
+            dit_module.flash_attn_func = patched_flash_attn_func
+            logger.info("Successfully patched daVinci DiT to use PyTorch SDPA")
+        except Exception as e:
+            logger.error(f"Failed to patch daVinci DiT flash_attn: {e}")
+            raise
+
     ensure_magi_parallel_groups()
 
     return {

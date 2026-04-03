@@ -14,36 +14,6 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from library import deepspeed_utils, train_util
-from library.utils import setup_logging
-
-setup_logging()
-import logging
-
-logger = logging.getLogger(__name__)
-
-# Patch daVinci DiT to fallback to PyTorch SDPA if flash_attn is not available
-try:
-    import flash_attn
-    logger.info("flash_attn is available, using FlashAttention-2")
-except ImportError:
-    logger.warning("flash_attn not found, patching daVinci DiT to use PyTorch SDPA")
-    import sys
-    inference_path = os.path.join(os.path.dirname(__file__), "inference")
-    if os.path.isdir(inference_path):
-        sys.path.insert(0, inference_path)
-        try:
-            from model.dit import dit_module
-            def patched_flash_attn_func(q, k, v):
-                q = q.transpose(1, 2)
-                k = k.transpose(1, 2)
-                v = v.transpose(1, 2)
-                attn_out = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False)
-                return attn_out.transpose(1, 2)
-            dit_module.flash_attn_func = patched_flash_attn_func
-            logger.info("Successfully patched daVinci DiT to use PyTorch SDPA")
-        except Exception as e:
-            logger.warning(f"Failed to patch daVinci DiT: {e}")
-
 from library.magi_utils import (
     MagiModelWrapper,
     _str_to_torch_dtype,
@@ -53,7 +23,11 @@ from library.magi_utils import (
     load_magi_dit_model,
     resolve_data_path,
 )
+from library.utils import setup_logging
 from networks import lora_magi
+
+setup_logging()
+import logging
 
 logger = logging.getLogger(__name__)
 LATENT_CACHE_KEY_PATTERN = re.compile(r"^latents_\d+x\d+x\d+_[a-zA-Z0-9]+$")
