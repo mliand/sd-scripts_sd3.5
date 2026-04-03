@@ -295,6 +295,9 @@ def train(args: argparse.Namespace) -> None:
         accelerator.device,
         model_dtype,
     )
+    if args.gradient_checkpointing and hasattr(model, "enable_gradient_checkpointing"):
+        model.enable_gradient_checkpointing()
+        logger.info("Enabled gradient checkpointing for daVinci DiT.")
     model.train()
 
     if args.train_lora:
@@ -524,6 +527,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--save_dtype", type=str, default="bf16", help="bf16/fp16/fp32")
     parser.add_argument("--mixed_precision", type=str, default="bf16", choices=["no", "fp16", "bf16"])
     parser.add_argument("--full_fp16", action="store_true", help="Enable full fp16 training patch (same as other sd-scripts trainers).")
+    parser.add_argument("--gradient_checkpointing", action="store_true", help="Enable gradient checkpointing for daVinci DiT.")
 
     parser.add_argument("--discrete_flow_shift", type=float, default=5.0, help="Shift used in flow-style sigma sampling.")
     parser.add_argument("--seed", type=int, default=None)

@@ -27,6 +27,7 @@ from magi_compiler.api import magi_register_custom_op
 from magi_compiler.config import CompileConfig
 from torch import Tensor
 from torch.nn import Parameter
+from torch.utils.checkpoint import checkpoint
 
 
 @dataclass
@@ -834,9 +835,16 @@ def config_patch(compile_config: CompileConfig) -> CompileConfig:
 class TransformerBlock(torch.nn.Module):
     def __init__(self, model_config: Any):
         super().__init__()
+        self.gradient_checkpointing = False
         self.layers: list[TransFormerLayer] = nn.ModuleList()
         for layer_idx in range(model_config.num_layers):
             self.layers.append(TransFormerLayer(model_config, layer_idx))
+
+    def enable_gradient_checkpointing(self):
+        self.gradient_checkpointing = True
+
+    def disable_gradient_checkpointing(self):
+        self.gradient_checkpointing = False
 
     def forward(
         self,
@@ -850,16 +858,31 @@ class TransformerBlock(torch.nn.Module):
         cp_split_sizes: List[int],
     ) -> torch.Tensor:
         for _, layer in enumerate(self.layers):
-            x = layer(
-                x,
-                rope,
-                permute_mapping,
-                inv_permute_mapping,
-                varlen_handler,
-                local_attn_handler,
-                modality_dispatcher,
-                cp_split_sizes,
-            )
+            if self.training and self.gradient_checkpointing and torch.is_grad_enabled():
+                def custom_forward(hidden_states: torch.Tensor) -> torch.Tensor:
+                    return layer(
+                        hidden_states,
+                        rope,
+                        permute_mapping,
+                        inv_permute_mapping,
+                        varlen_handler,
+                        local_attn_handler,
+                        modality_dispatcher,
+                        cp_split_sizes,
+                    )
+
+                x = checkpoint(custom_forward, x, use_reentrant=False)
+            else:
+                x = layer(
+                    x,
+                    rope,
+                    permute_mapping,
+                    inv_permute_mapping,
+                    varlen_handler,
+                    local_attn_handler,
+                    modality_dispatcher,
+                    cp_split_sizes,
+                )
         return x
 
 
@@ -878,6 +901,7 @@ class DiTModel(torch.nn.Module):
 
     def __init__(self, model_config: Any):
         super().__init__()
+        self.gradient_checkpointing = False
         self.config = TransformerConfig(
             hidden_size=model_config.hidden_size,
             video_in_channels=model_config.video_in_channels,
@@ -904,6 +928,14 @@ class DiTModel(torch.nn.Module):
         self.final_linear_audio = nn.Linear(
             self.config.hidden_size, self.config.audio_in_channels, bias=False, dtype=torch.float32
         )
+
+    def enable_gradient_checkpointing(self):
+        self.gradient_checkpointing = True
+        self.block.enable_gradient_checkpointing()
+
+    def disable_gradient_checkpointing(self):
+        self.gradient_checkpointing = False
+        self.block.disable_gradient_checkpointing()
 
     def forward(
         self,
