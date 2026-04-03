@@ -899,7 +899,8 @@ class TransformerBlock(torch.nn.Module):
                         cp_split_sizes,
                     )
 
-                x = checkpoint(custom_forward, x, use_reentrant=True)
+                # Non-reentrant checkpointing avoids duplicated gradient reduction with DeepSpeed ZeRO-2.
+                x = checkpoint(custom_forward, x, use_reentrant=False)
             else:
                 x = layer(
                     x,
