@@ -167,12 +167,40 @@ def import_magi_components():
             import torch.nn.functional as F
 
             def patched_flash_attn_func(q, k, v):
-                """Fallback to PyTorch SDPA when flash_attn is not available."""
-                q = q.transpose(1, 2)
-                k = k.transpose(1, 2)
-                v = v.transpose(1, 2)
+                """
+                Fallback to PyTorch SDPA when flash_attn is not available.
+
+                daVinci's flash_attn_func expects inputs with shape:
+                  q, k, v: [1, seqlen, num_heads, head_dim]
+
+                Returns:
+                  attn_out: [1, seqlen, num_heads, head_dim]
+                """
+                # Remove leading batch dimension if present
+                if q.ndim == 4 and q.shape[0] == 1:
+                    q = q.squeeze(0)
+                    k = k.squeeze(0)
+                    v = v.squeeze(0)
+                    needs_unsqueeze = True
+                else:
+                    needs_unsqueeze = False
+
+                # Transpose from [seqlen, num_heads, head_dim] to [num_heads, seqlen, head_dim]
+                # Then add batch dim: [1, num_heads, seqlen, head_dim]
+                q = q.transpose(0, 1).unsqueeze(0)
+                k = k.transpose(0, 1).unsqueeze(0)
+                v = v.transpose(0, 1).unsqueeze(0)
+
+                # PyTorch SDPA
                 attn_out = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False)
-                return attn_out.transpose(1, 2)
+
+                # Transpose back: [1, num_heads, seqlen, head_dim] -> [1, seqlen, num_heads, head_dim]
+                attn_out = attn_out.squeeze(0).transpose(0, 1)
+
+                if needs_unsqueeze:
+                    attn_out = attn_out.unsqueeze(0)
+
+                return attn_out
 
             dit_module.flash_attn_func = patched_flash_attn_func
             logger.info("Successfully patched daVinci DiT to use PyTorch SDPA")
