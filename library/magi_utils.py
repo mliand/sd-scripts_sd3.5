@@ -122,6 +122,31 @@ def patch_single_process_parallel_state() -> None:
     ulysses_mod.get_cp_group = _safe_get_cp_group
 
 
+def ensure_magi_parallel_groups(
+    tp_size: int = 1,
+    pp_size: int = 1,
+    cp_size: int = 1,
+    distributed_timeout_minutes: int = 10,
+) -> None:
+    if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+        patch_single_process_parallel_state()
+        return
+
+    from inference.infra.distributed.parallel_state import initialize_model_parallel, model_parallel_is_initialized
+
+    if model_parallel_is_initialized():
+        return
+
+    initialize_model_parallel(
+        tp_size=tp_size,
+        pp_size=pp_size,
+        cp_size=cp_size,
+        nccl_communicator_config_path=None,
+        distributed_timeout_minutes=distributed_timeout_minutes,
+        order="tp-cp-pp-dp",
+    )
+
+
 def import_magi_components():
     ensure_magi_compiler_stub()
 
@@ -131,7 +156,7 @@ def import_magi_components():
     from inference.model.vae2_2.vae2_2_model import get_vae2_2
     from inference.pipeline.prompt_process import get_padded_t5_gemma_embedding
 
-    patch_single_process_parallel_state()
+    ensure_magi_parallel_groups()
 
     return {
         "ModelConfig": ModelConfig,
@@ -375,6 +400,7 @@ __all__ = [
     "default_audio_cache_name",
     "default_latent_cache_name",
     "default_te_cache_name",
+    "ensure_magi_parallel_groups",
     "get_caption",
     "import_magi_components",
     "load_jsonl_records",
