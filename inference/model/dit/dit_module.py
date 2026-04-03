@@ -312,8 +312,36 @@ class _BF16ComputeLinear(torch.autograd.Function):
         else:
             bias_cast = None
 
+        ctx.save_for_backward(input_cast, weight_cast, bias_cast)
+        ctx.input_dtype = input.dtype
+        ctx.weight_dtype = weight.dtype
+        ctx.bias_dtype = bias.dtype if bias is not None else None
+        ctx.compute_dtype = compute_dtype
+
         # Convert output to specified output data type
         return output.to(output_dtype)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        input_cast, weight_cast, bias_cast = ctx.saved_tensors
+        compute_dtype = ctx.compute_dtype
+
+        grad_output_cast = grad_output.to(compute_dtype)
+        original_shape = input_cast.shape
+
+        input_2d = input_cast.reshape(-1, input_cast.shape[-1])
+        grad_output_2d = grad_output_cast.reshape(-1, grad_output_cast.shape[-1])
+
+        grad_input = torch.matmul(grad_output_2d, weight_cast).reshape(original_shape)
+        grad_weight = torch.matmul(grad_output_2d.transpose(0, 1), input_2d)
+        grad_bias = grad_output_2d.sum(dim=0) if bias_cast is not None else None
+
+        grad_input = grad_input.to(ctx.input_dtype)
+        grad_weight = grad_weight.to(ctx.weight_dtype)
+        if grad_bias is not None and ctx.bias_dtype is not None:
+            grad_bias = grad_bias.to(ctx.bias_dtype)
+
+        return grad_input, grad_weight, grad_bias, None, None
 
 
 class BaseLinear(nn.Module):
