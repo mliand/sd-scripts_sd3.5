@@ -81,6 +81,20 @@ def prepare_deepspeed_plugin(args: argparse.Namespace):
         )
         exit(1)
 
+    if args.offload_optimizer_device is not None:
+        try:
+            logger.info("[DeepSpeed] start to manually build cpu_adam.")
+            deepspeed.ops.op_builder.CPUAdamBuilder().load()
+            logger.info("[DeepSpeed] building cpu_adam done.")
+        except Exception as e:
+            logger.warning(f"[DeepSpeed] failed to build cpu_adam: {type(e).__name__}: {e}")
+            logger.warning(
+                "[DeepSpeed] disabling optimizer offload and continuing with regular optimizer. "
+                "If you need CPU/NVMe offload, align CUDA toolkit version with torch CUDA build."
+            )
+            args.offload_optimizer_device = None
+            args.offload_optimizer_nvme_path = None
+
     deepspeed_plugin = DeepSpeedPlugin(
         zero_stage=args.zero_stage,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
@@ -108,11 +122,6 @@ def prepare_deepspeed_plugin(args: argparse.Namespace):
             logger.info(
                 "[DeepSpeed]full fp16, fp16_master_weights_and_grads currently only supported using ZeRO-Offload with DeepSpeedCPUAdam on ZeRO-2 stage."
             )
-
-    if args.offload_optimizer_device is not None:
-        logger.info("[DeepSpeed] start to manually build cpu_adam.")
-        deepspeed.ops.op_builder.CPUAdamBuilder().load()
-        logger.info("[DeepSpeed] building cpu_adam done.")
 
     return deepspeed_plugin
 
