@@ -282,6 +282,13 @@ def train(args: argparse.Namespace) -> None:
     model_dtype = _str_to_torch_dtype(args.model_dtype, default=torch.bfloat16)
     save_dtype = _str_to_torch_dtype(args.save_dtype, default=torch.bfloat16)
 
+    # Auto-detect config.json from pretrained model directory when not explicitly provided
+    if args.config_load_path is None and os.path.isdir(args.pretrained_model_name_or_path):
+        candidate = os.path.join(args.pretrained_model_name_or_path, "config.json")
+        if os.path.isfile(candidate):
+            logger.info(f"Auto-detected model config: {candidate}")
+            args.config_load_path = candidate
+
     model_cfg, data_proxy_cfg, _ = load_magi_configs(args.config_load_path)
     comps = import_magi_components()
     MagiDataProxy = comps["MagiDataProxy"]
@@ -311,8 +318,26 @@ def train(args: argparse.Namespace) -> None:
         model_dtype,
     )
     if args.gradient_checkpointing and hasattr(model, "enable_gradient_checkpointing"):
-        model.enable_gradient_checkpointing()
-        logger.info("Enabled gradient checkpointing for daVinci DiT.")
+        if args.deepspeed and args.zero_stage == 2:
+            logger.warning(
+                "Gradient checkpointing with DeepSpeed ZeRO-2 requires non-reentrant checkpoint. "
+                "Attempting to patch daVinci DiT checkpoint implementation..."
+            )
+            try:
+                from torch.utils.checkpoint import checkpoint
+                original_checkpoint = checkpoint
+                def non_reentrant_checkpoint(function, *args, use_reentrant=True, **kwargs):
+                    return original_checkpoint(function, *args, use_reentrant=False, **kwargs)
+                torch.utils.checkpoint.checkpoint = non_reentrant_checkpoint
+                model.enable_gradient_checkpointing()
+                torch.utils.checkpoint.checkpoint = original_checkpoint
+                logger.info("Patched gradient checkpointing to non-reentrant mode for ZeRO-2.")
+            except Exception as e:
+                logger.error(f"Failed to patch gradient checkpointing: {e}. Disabling gradient checkpointing.")
+                args.gradient_checkpointing = False
+        else:
+            model.enable_gradient_checkpointing()
+            logger.info("Enabled gradient checkpointing for daVinci DiT.")
     model.train()
 
     if args.train_lora:

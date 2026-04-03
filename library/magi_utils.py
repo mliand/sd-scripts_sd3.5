@@ -249,6 +249,13 @@ class MagiModelWrapper(torch.nn.Module):
         self.data_proxy = data_proxy
         self.audio_in_channels = audio_in_channels
 
+    @property
+    def device(self) -> torch.device:
+        try:
+            return next(self.model.parameters()).device
+        except StopIteration:
+            return torch.device("cpu")
+
     def forward(
         self,
         noisy_video: torch.Tensor,
