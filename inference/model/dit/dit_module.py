@@ -887,8 +887,9 @@ class TransformerBlock(torch.nn.Module):
     ) -> torch.Tensor:
         for _, layer in enumerate(self.layers):
             if self.training and self.gradient_checkpointing and torch.is_grad_enabled():
-                def custom_forward(hidden_states: torch.Tensor) -> torch.Tensor:
-                    return layer(
+                # Bind layer into default arg to avoid Python late-binding across loop iterations.
+                def custom_forward(hidden_states: torch.Tensor, bound_layer: TransFormerLayer = layer) -> torch.Tensor:
+                    return bound_layer(
                         hidden_states,
                         rope,
                         permute_mapping,
