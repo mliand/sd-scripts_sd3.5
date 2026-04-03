@@ -871,7 +871,7 @@ class TransformerBlock(torch.nn.Module):
                         cp_split_sizes,
                     )
 
-                x = checkpoint(custom_forward, x, use_reentrant=False)
+                x = checkpoint(custom_forward, x, use_reentrant=True)
             else:
                 x = layer(
                     x,
