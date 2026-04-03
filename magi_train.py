@@ -417,6 +417,9 @@ def train(args: argparse.Namespace) -> None:
     while global_step < args.max_train_steps:
         for batch in dataloader:
             with accelerator.accumulate(*training_models):
+                if global_step == 0 and accelerator.is_local_main_process:
+                    logger.info("Starting first training step...")
+
                 latents = batch["latents"].to(device=accelerator.device, dtype=model_dtype)
                 _validate_video_latent_shape(latents)
                 prompt_embeds = batch["prompt_embeds"].to(device=accelerator.device, dtype=model_dtype)
@@ -473,6 +476,9 @@ def train(args: argparse.Namespace) -> None:
                 global_step += 1
                 running_loss += float(loss.detach().item())
                 progress.update(1)
+
+                if accelerator.is_local_main_process and global_step <= 3:
+                    logger.info(f"Completed step {global_step}, loss={loss.detach().item():.6f}")
 
                 if global_step % args.log_every_n_steps == 0 and accelerator.is_local_main_process:
                     avg_loss = running_loss / args.log_every_n_steps
