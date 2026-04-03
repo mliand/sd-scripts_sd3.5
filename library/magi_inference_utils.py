@@ -127,7 +127,7 @@ def add_common_inference_arguments(parser: argparse.ArgumentParser) -> argparse.
 
     parser.add_argument("--width", type=int, default=480, help="Output video width in pixels.")
     parser.add_argument("--height", type=int, default=272, help="Output video height in pixels.")
-    parser.add_argument("--num_frames", type=int, default=81, help="Output frame count.")
+    parser.add_argument("--num_frames", type=int, default=256, help="Output frame count.")
     parser.add_argument("--fps", type=int, default=24)
 
     parser.add_argument("--device", type=str, default="cuda")

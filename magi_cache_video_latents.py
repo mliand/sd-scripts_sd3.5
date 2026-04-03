@@ -207,7 +207,7 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vae_dtype", type=str, default="bf16", help="VAE dtype: bf16/fp16/fp32.")
 
     parser.add_argument("--video_field", type=str, default="video", help="Preferred key name for video path in JSONL.")
-    parser.add_argument("--num_frames", type=int, default=81, help="Number of frames sampled per item.")
+    parser.add_argument("--num_frames", type=int, default=256, help="Number of frames sampled per item.")
     parser.add_argument("--frame_stride", type=int, default=1, help="Stride used in head sampling mode.")
     parser.add_argument("--sampling", type=str, default="head", choices=["head", "uniform"], help="Frame sampling strategy.")
     parser.add_argument(

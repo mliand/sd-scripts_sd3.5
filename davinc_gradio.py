@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 MAX_SIDE = 640
-MAX_FRAMES = 245
+MAX_FRAMES = 256
 MIN_SIDE = 64
 SIDE_STEP = 16
 
@@ -249,7 +249,7 @@ def build_demo(defaults: dict, manager: DavincManager):
                     width = gr.Slider(label="Width", minimum=MIN_SIDE, maximum=MAX_SIDE, step=SIDE_STEP, value=480)
                     height = gr.Slider(label="Height", minimum=MIN_SIDE, maximum=MAX_SIDE, step=SIDE_STEP, value=272)
                 with gr.Row():
-                    num_frames = gr.Slider(label="Frames", minimum=1, maximum=MAX_FRAMES, step=1, value=81)
+                    num_frames = gr.Slider(label="Frames", minimum=1, maximum=MAX_FRAMES, step=1, value=256)
                     seed = gr.Number(label="Seed (-1 随机)", value=-1, precision=0)
                 generate_btn = gr.Button("生成视频", variant="primary")
                 video = gr.Video(label="Output Video", interactive=False)
