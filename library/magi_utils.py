@@ -176,29 +176,41 @@ def import_magi_components():
                 Returns:
                   attn_out: [1, seqlen, num_heads, head_dim]
                 """
-                # Remove leading batch dimension if present
-                if q.ndim == 4 and q.shape[0] == 1:
-                    q = q.squeeze(0)
-                    k = k.squeeze(0)
-                    v = v.squeeze(0)
-                    needs_unsqueeze = True
+                # Debug: log actual input shapes on first call
+                if not hasattr(patched_flash_attn_func, "_logged_shapes"):
+                    logger.info(f"[FlashAttn Fallback] Input shapes: q={q.shape}, k={k.shape}, v={v.shape}")
+                    patched_flash_attn_func._logged_shapes = True
+
+                # Handle different input formats
+                original_shape = q.shape
+
+                if q.ndim == 4:
+                    # Expected: [1, seqlen, num_heads, head_dim] or [batch, seqlen, num_heads, head_dim]
+                    batch, seqlen, num_heads, head_dim = q.shape
+                    # Reshape to [batch, num_heads, seqlen, head_dim] for SDPA
+                    q = q.transpose(1, 2)
+                    k = k.transpose(1, 2)
+                    v = v.transpose(1, 2)
+                elif q.ndim == 3:
+                    # [seqlen, num_heads, head_dim] - add batch dim
+                    q = q.unsqueeze(0).transpose(1, 2)
+                    k = k.unsqueeze(0).transpose(1, 2)
+                    v = v.unsqueeze(0).transpose(1, 2)
                 else:
-                    needs_unsqueeze = False
+                    raise ValueError(f"Unexpected input shape: {original_shape}")
 
-                # Transpose from [seqlen, num_heads, head_dim] to [num_heads, seqlen, head_dim]
-                # Then add batch dim: [1, num_heads, seqlen, head_dim]
-                q = q.transpose(0, 1).unsqueeze(0)
-                k = k.transpose(0, 1).unsqueeze(0)
-                v = v.transpose(0, 1).unsqueeze(0)
-
-                # PyTorch SDPA
+                # PyTorch SDPA: [batch, num_heads, seqlen, head_dim]
                 attn_out = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False)
 
-                # Transpose back: [1, num_heads, seqlen, head_dim] -> [1, seqlen, num_heads, head_dim]
-                attn_out = attn_out.squeeze(0).transpose(0, 1)
+                # Transpose back to original format
+                attn_out = attn_out.transpose(1, 2)
 
-                if needs_unsqueeze:
-                    attn_out = attn_out.unsqueeze(0)
+                if original_shape[0] == 1 and attn_out.shape[0] == 1:
+                    # Keep [1, seqlen, num_heads, head_dim] format
+                    pass
+                elif len(original_shape) == 3:
+                    # Remove batch dim: [1, seqlen, num_heads, head_dim] -> [seqlen, num_heads, head_dim]
+                    attn_out = attn_out.squeeze(0)
 
                 return attn_out
 
