@@ -264,20 +264,55 @@ class MagiModelWrapper(torch.nn.Module):
 
 
 def load_jsonl_records(path: str) -> list[dict]:
-    records = []
+    def _metadata_json_to_records(obj: dict) -> list[dict]:
+        records = []
+        for key, value in obj.items():
+            record = dict(value) if isinstance(value, dict) else {"caption": str(value)}
+            record.setdefault("id", Path(str(key)).stem)
+            record.setdefault("path", str(key))
+            suffix = Path(str(key)).suffix.lower()
+            if suffix in {".mp4", ".webm", ".mov", ".mkv", ".avi"}:
+                record.setdefault("video", str(key))
+            records.append(record)
+        return records
+
     with open(path, "r", encoding="utf-8") as f:
-        for line_no, line in enumerate(f, start=1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError as e:
-                raise ValueError(f"Invalid JSONL at line {line_no} in {path}: {e}") from e
-            if not isinstance(obj, dict):
-                raise ValueError(f"JSONL line {line_no} is not an object: {line}")
-            records.append(obj)
-    return records
+        content = f.read()
+
+    records = []
+    jsonl_error = None
+    for line_no, line in enumerate(content.splitlines(), start=1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError as e:
+            jsonl_error = e
+            records = []
+            break
+        if not isinstance(obj, dict):
+            raise ValueError(f"JSONL line {line_no} is not an object: {line}")
+        records.append(obj)
+
+    if records:
+        return records
+
+    try:
+        obj = json.loads(content)
+    except json.JSONDecodeError as e:
+        if jsonl_error is not None:
+            raise ValueError(f"Invalid JSONL at line 1 in {path}: {jsonl_error}") from jsonl_error
+        raise ValueError(f"Invalid JSON or JSONL in {path}: {e}") from e
+
+    if isinstance(obj, list):
+        if not all(isinstance(item, dict) for item in obj):
+            raise ValueError(f"JSON array in {path} must contain only objects.")
+        return obj
+    if isinstance(obj, dict):
+        return _metadata_json_to_records(obj)
+
+    raise ValueError(f"Unsupported manifest format in {path}: expected JSONL, JSON array, or metadata JSON object.")
 
 
 def save_jsonl_records(path: str, records: Sequence[dict]) -> None:
