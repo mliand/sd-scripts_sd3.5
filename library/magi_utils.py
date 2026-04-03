@@ -329,6 +329,12 @@ def resolve_data_path(base_manifest_path: str, value: str) -> str:
     return os.path.abspath(os.path.join(base_dir, value))
 
 
+def rebase_manifest_path(base_manifest_path: str, value: str, new_manifest_path: str) -> str:
+    resolved = resolve_data_path(base_manifest_path, value)
+    new_base_dir = os.path.dirname(os.path.abspath(new_manifest_path))
+    return os.path.relpath(resolved, new_base_dir)
+
+
 def build_item_key(record: dict, index: int) -> str:
     if "id" in record and record["id"]:
         return str(record["id"])
@@ -374,6 +380,7 @@ __all__ = [
     "load_jsonl_records",
     "load_magi_configs",
     "load_magi_dit_model",
+    "rebase_manifest_path",
     "resolve_data_path",
     "save_jsonl_records",
 ]

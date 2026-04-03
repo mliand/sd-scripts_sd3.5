@@ -11,6 +11,7 @@ from library.magi_utils import (
     default_audio_cache_name,
     import_magi_components,
     load_jsonl_records,
+    rebase_manifest_path,
     resolve_data_path,
     save_jsonl_records,
 )
@@ -95,6 +96,14 @@ def cache_audio_latents(args: argparse.Namespace) -> None:
 
         rel_cache = os.path.relpath(cache_path, os.path.dirname(os.path.abspath(output_manifest)))
         new_record = dict(record)
+        if "magi_latent_cache" in new_record and new_record["magi_latent_cache"]:
+            new_record["magi_latent_cache"] = rebase_manifest_path(
+                args.dataset_jsonl, str(new_record["magi_latent_cache"]), output_manifest
+            )
+        if "magi_te_cache" in new_record and new_record["magi_te_cache"]:
+            new_record["magi_te_cache"] = rebase_manifest_path(
+                args.dataset_jsonl, str(new_record["magi_te_cache"]), output_manifest
+            )
         new_record["magi_audio_cache"] = rel_cache
         updated_records.append(new_record)
 

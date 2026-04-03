@@ -13,6 +13,7 @@ from library.magi_utils import (
     get_caption,
     import_magi_components,
     load_jsonl_records,
+    rebase_manifest_path,
     save_jsonl_records,
 )
 from library.utils import setup_logging
@@ -67,6 +68,14 @@ def cache_text_encoder_outputs(args: argparse.Namespace) -> None:
 
         rel_cache = os.path.relpath(cache_path, os.path.dirname(os.path.abspath(output_manifest)))
         new_record = dict(record)
+        if "magi_latent_cache" in new_record and new_record["magi_latent_cache"]:
+            new_record["magi_latent_cache"] = rebase_manifest_path(
+                args.dataset_jsonl, str(new_record["magi_latent_cache"]), output_manifest
+            )
+        if "magi_audio_cache" in new_record and new_record["magi_audio_cache"]:
+            new_record["magi_audio_cache"] = rebase_manifest_path(
+                args.dataset_jsonl, str(new_record["magi_audio_cache"]), output_manifest
+            )
         new_record["magi_te_cache"] = rel_cache
         updated_records.append(new_record)
 
