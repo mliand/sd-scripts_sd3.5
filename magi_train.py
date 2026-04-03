@@ -194,6 +194,21 @@ def _sample_sigmas(batch_size: int, device: torch.device, shift: float) -> torch
     return sigmas
 
 
+def _validate_video_latent_shape(latents: torch.Tensor) -> None:
+    if latents.ndim != 5:
+        raise ValueError(f"Expected video latents with shape [B, C, T, H, W], got {tuple(latents.shape)}")
+
+    _, _, _, latent_h, latent_w = latents.shape
+    if latent_h % 2 != 0 or latent_w % 2 != 0:
+        approx_h = latent_h * 16
+        approx_w = latent_w * 16
+        raise ValueError(
+            "Video latent spatial size must be divisible by 2 for MagiDataProxy patching. "
+            f"Got latent shape HxW={latent_h}x{latent_w} (approx output resolution {approx_w}x{approx_h}). "
+            "Please recache videos with width/height that are multiples of 32, e.g. 480x256 or 512x288."
+        )
+
+
 def _save_model_checkpoint(
     accelerator: Accelerator,
     wrapper: MagiModelWrapper,
@@ -378,6 +393,7 @@ def train(args: argparse.Namespace) -> None:
         for batch in dataloader:
             with accelerator.accumulate(*training_models):
                 latents = batch["latents"].to(device=accelerator.device, dtype=model_dtype)
+                _validate_video_latent_shape(latents)
                 prompt_embeds = batch["prompt_embeds"].to(device=accelerator.device, dtype=model_dtype)
                 prompt_len = batch["prompt_len"].to(device=accelerator.device)
 
