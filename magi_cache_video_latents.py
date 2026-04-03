@@ -161,7 +161,7 @@ def cache_video_latents(args: argparse.Namespace) -> None:
             musubi_style_key = f"latents_{latent_f}x{latent_h}x{latent_w}_{latent_dtype}"
             meta_tensors = {
                 "latent_video": latent_cpu,
-                musubi_style_key: latent_cpu,
+                musubi_style_key: latent_cpu.clone(),
                 "frame_count": torch.tensor([args.num_frames], dtype=torch.int32),
                 "height": torch.tensor([args.height], dtype=torch.int32),
                 "width": torch.tensor([args.width], dtype=torch.int32),
