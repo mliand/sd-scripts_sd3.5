@@ -170,47 +170,43 @@ def import_magi_components():
                 """
                 Fallback to PyTorch SDPA when flash_attn is not available.
 
-                daVinci's flash_attn_func expects inputs with shape:
-                  q, k, v: [1, seqlen, num_heads, head_dim]
+                Handles Multi-Query Attention (MQA) / Grouped-Query Attention (GQA)
+                where K/V have fewer heads than Q.
 
-                Returns:
-                  attn_out: [1, seqlen, num_heads, head_dim]
+                Input: q, k, v with shape [1, seqlen, num_heads, head_dim]
+                Returns: attn_out with shape [1, seqlen, num_heads_q, head_dim]
                 """
                 # Debug: log actual input shapes on first call
                 if not hasattr(patched_flash_attn_func, "_logged_shapes"):
                     logger.info(f"[FlashAttn Fallback] Input shapes: q={q.shape}, k={k.shape}, v={v.shape}")
                     patched_flash_attn_func._logged_shapes = True
 
-                # Handle different input formats
-                original_shape = q.shape
+                if q.ndim != 4:
+                    raise ValueError(f"Expected 4D input, got q.shape={q.shape}")
 
-                if q.ndim == 4:
-                    # Expected: [1, seqlen, num_heads, head_dim] or [batch, seqlen, num_heads, head_dim]
-                    batch, seqlen, num_heads, head_dim = q.shape
-                    # Reshape to [batch, num_heads, seqlen, head_dim] for SDPA
-                    q = q.transpose(1, 2)
-                    k = k.transpose(1, 2)
-                    v = v.transpose(1, 2)
-                elif q.ndim == 3:
-                    # [seqlen, num_heads, head_dim] - add batch dim
-                    q = q.unsqueeze(0).transpose(1, 2)
-                    k = k.unsqueeze(0).transpose(1, 2)
-                    v = v.unsqueeze(0).transpose(1, 2)
-                else:
-                    raise ValueError(f"Unexpected input shape: {original_shape}")
+                batch, seqlen, num_heads_q, head_dim = q.shape
+                _, _, num_heads_kv, _ = k.shape
 
-                # PyTorch SDPA: [batch, num_heads, seqlen, head_dim]
+                # Handle MQA/GQA: expand K/V heads to match Q
+                if num_heads_kv < num_heads_q:
+                    if num_heads_q % num_heads_kv != 0:
+                        raise ValueError(f"num_heads_q ({num_heads_q}) must be divisible by num_heads_kv ({num_heads_kv})")
+
+                    repeat_factor = num_heads_q // num_heads_kv
+                    # [batch, seqlen, num_heads_kv, head_dim] -> [batch, seqlen, num_heads_q, head_dim]
+                    k = k.repeat_interleave(repeat_factor, dim=2)
+                    v = v.repeat_interleave(repeat_factor, dim=2)
+
+                # Transpose to SDPA format: [batch, num_heads, seqlen, head_dim]
+                q = q.transpose(1, 2)
+                k = k.transpose(1, 2)
+                v = v.transpose(1, 2)
+
+                # PyTorch SDPA
                 attn_out = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False)
 
-                # Transpose back to original format
+                # Transpose back: [batch, num_heads, seqlen, head_dim] -> [batch, seqlen, num_heads, head_dim]
                 attn_out = attn_out.transpose(1, 2)
-
-                if original_shape[0] == 1 and attn_out.shape[0] == 1:
-                    # Keep [1, seqlen, num_heads, head_dim] format
-                    pass
-                elif len(original_shape) == 3:
-                    # Remove batch dim: [1, seqlen, num_heads, head_dim] -> [seqlen, num_heads, head_dim]
-                    attn_out = attn_out.squeeze(0)
 
                 return attn_out
 
