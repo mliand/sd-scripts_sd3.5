@@ -38,7 +38,7 @@ def get_t5_gemma_encoder(model_path: str, device: str, weight_dtype: torch.dtype
     return _t5_gemma_cache
 
 
-@torch.inference_mode()
+@torch.no_grad()
 def get_t5_gemma_embedding(prompt: str, model_path: str, device: str, weight_dtype: torch.dtype) -> torch.Tensor:
     encoder = get_t5_gemma_encoder(model_path=model_path, device=device, weight_dtype=weight_dtype)
     return encoder.encode(prompt)
