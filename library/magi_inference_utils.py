@@ -102,7 +102,7 @@ def add_common_inference_arguments(parser: argparse.ArgumentParser) -> argparse.
     parser.add_argument("--pretrained_model_name_or_path", type=str, required=True, help="Path to daVinci DiT checkpoint.")
     parser.add_argument("--config_load_path", type=str, default=None, help="Optional daVinci config.json path.")
     parser.add_argument("--vae_model_path", type=str, required=True, help="Path to Wan2.2_VAE.pth.")
-    parser.add_argument("--audio_model_path", type=str, required=True, help="Path to daVinci audio model.")
+    parser.add_argument("--audio_model_path", type=str, default=None, help="Path to daVinci audio model (not required when --video_only).")
     parser.add_argument("--txt_model_path", type=str, required=True, help="Path to T5-Gemma encoder model.")
 
     parser.add_argument("--prompt", type=str, required=True)
@@ -286,12 +286,20 @@ def prepare_inference_context(args: argparse.Namespace) -> MagiInferenceContext:
     model_dtype = _str_to_torch_dtype(args.model_dtype, default=torch.bfloat16)
     decode_dtype = _str_to_torch_dtype(args.decode_dtype, default=torch.bfloat16)
 
-    model_cfg, data_proxy_cfg, t5_target_length = load_magi_configs(args.config_load_path)
+    # Auto-detect config.json from model directory (same as magi_train.py)
+    config_load_path = getattr(args, "config_load_path", None)
+    pretrained_path = args.pretrained_model_name_or_path
+    if config_load_path is None and os.path.isdir(pretrained_path):
+        candidate = os.path.join(pretrained_path, "config.json")
+        if os.path.isfile(candidate):
+            config_load_path = candidate
+            logger.info(f"Auto-detected config.json from model directory: {config_load_path}")
+
+    model_cfg, data_proxy_cfg, t5_target_length = load_magi_configs(config_load_path)
     comps = import_magi_components()
     MagiDataProxy = comps["MagiDataProxy"]
     get_vae2_2 = comps["get_vae2_2"]
     get_padded_t5_gemma_embedding = comps["get_padded_t5_gemma_embedding"]
-    from inference.model.sa_audio import SAAudioFeatureExtractor
 
     model = load_magi_dit_model(
         args.pretrained_model_name_or_path,
@@ -310,8 +318,14 @@ def prepare_inference_context(args: argparse.Namespace) -> MagiInferenceContext:
     vae = vae.to(device=device, dtype=decode_dtype)
     vae.vae.eval()
 
-    logger.info(f"Loading audio VAE from {args.audio_model_path}")
-    audio_vae = SAAudioFeatureExtractor(device=str(device), model_path=args.audio_model_path)
+    video_only = getattr(args, "video_only", False)
+    if video_only:
+        logger.info("video_only mode: skipping audio VAE loading")
+        audio_vae = None
+    else:
+        from inference.model.sa_audio import SAAudioFeatureExtractor
+        logger.info(f"Loading audio VAE from {args.audio_model_path}")
+        audio_vae = SAAudioFeatureExtractor(device=str(device), model_path=args.audio_model_path)
 
     _maybe_offload_vae_obj = bool(args.offload_vae)
     _maybe_offload_audio_obj = bool(args.offload_audio_vae)
