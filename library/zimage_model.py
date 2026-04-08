@@ -862,21 +862,23 @@ class ZImageTransformer2DModel(nn.Module):
 
         for _ in range(repulsion_config.inner_steps):
             with torch.enable_grad():
-                working_tokens = updated_tokens.detach().to(torch.float32).requires_grad_(True)
-                masked_tokens = working_tokens
-                if bool_mask is not None:
-                    masked_tokens = masked_tokens * bool_mask.unsqueeze(-1).to(masked_tokens.dtype)
+                autocast_device = caption_tokens.device.type
+                with torch.autocast(device_type=autocast_device, enabled=False):
+                    working_tokens = updated_tokens.detach().to(torch.float32).requires_grad_(True)
+                    masked_tokens = working_tokens
+                    if bool_mask is not None:
+                        masked_tokens = masked_tokens * bool_mask.unsqueeze(-1).to(masked_tokens.dtype)
 
-                flattened = masked_tokens.reshape(masked_tokens.shape[0], -1)
-                normalized = F.normalize(flattened, dim=-1, eps=1e-6)
-                kernel = normalized @ normalized.transpose(0, 1)
-                kernel = 0.5 * (kernel + kernel.transpose(0, 1))
-                kernel = kernel / normalized.shape[0]
+                    flattened = masked_tokens.reshape(masked_tokens.shape[0], -1)
+                    normalized = F.normalize(flattened, dim=-1, eps=1e-6)
+                    kernel = normalized @ normalized.transpose(0, 1)
+                    kernel = 0.5 * (kernel + kernel.transpose(0, 1))
+                    kernel = (kernel / normalized.shape[0]).to(torch.float32)
 
-                eigvals = torch.linalg.eigvalsh(kernel)
-                eigvals = eigvals.clamp_min(1.0e-8)
-                vendi_entropy = -(eigvals * eigvals.log()).sum()
-                grad = torch.autograd.grad(vendi_entropy, working_tokens, only_inputs=True)[0]
+                    eigvals = torch.linalg.eigvalsh(kernel)
+                    eigvals = eigvals.clamp_min(1.0e-8)
+                    vendi_entropy = -(eigvals * eigvals.log()).sum()
+                    grad = torch.autograd.grad(vendi_entropy, working_tokens, only_inputs=True)[0]
 
             updated_tokens = (working_tokens + update_scale * grad).detach().to(original_tokens.dtype)
             if bool_mask is not None:
