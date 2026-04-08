@@ -89,7 +89,15 @@ def apply_contextual_vendi_repulsion(
     original_tokens = caption_tokens
     updated_tokens = caption_tokens
     bool_mask = None if cap_mask is None else cap_mask.to(device=caption_tokens.device, dtype=torch.bool)
-    update_scale = repulsion_config.scale / repulsion_config.inner_steps
+    base_update_scale = repulsion_config.scale / repulsion_config.inner_steps
+
+    if bool_mask is None:
+        token_count_scale = 1.0
+    else:
+        valid_token_counts = bool_mask.sum(dim=1).clamp_min(1).to(torch.float32)
+        token_count_scale = valid_token_counts.mean().rsqrt().item()
+
+    update_scale = base_update_scale * token_count_scale
 
     for _ in range(repulsion_config.inner_steps):
         with torch.enable_grad():
