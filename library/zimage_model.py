@@ -74,50 +74,6 @@ class ContextualRepulsionConfig:
         return True
 
 
-def apply_contextual_vendi_repulsion(
-    caption_tokens: torch.Tensor,
-    cap_mask: Optional[torch.Tensor],
-    repulsion_config: Optional[ContextualRepulsionConfig],
-    layer_idx: int,
-    step_idx: Optional[int],
-) -> torch.Tensor:
-    if repulsion_config is None or not repulsion_config.active_for(layer_idx, step_idx):
-        return caption_tokens
-    if caption_tokens.shape[0] < 2:
-        return caption_tokens
-
-    original_tokens = caption_tokens
-    updated_tokens = caption_tokens
-    bool_mask = None if cap_mask is None else cap_mask.to(device=caption_tokens.device, dtype=torch.bool)
-    update_scale = repulsion_config.scale / repulsion_config.inner_steps
-
-    for _ in range(repulsion_config.inner_steps):
-        with torch.enable_grad():
-            autocast_device = caption_tokens.device.type
-            with torch.autocast(device_type=autocast_device, enabled=False):
-                working_tokens = updated_tokens.detach().to(torch.float32).requires_grad_(True)
-                masked_tokens = working_tokens
-                if bool_mask is not None:
-                    masked_tokens = masked_tokens * bool_mask.unsqueeze(-1).to(masked_tokens.dtype)
-
-                flattened = masked_tokens.reshape(masked_tokens.shape[0], -1)
-                normalized = F.normalize(flattened, dim=-1, eps=1e-6)
-                kernel = normalized @ normalized.transpose(0, 1)
-                kernel = 0.5 * (kernel + kernel.transpose(0, 1))
-                kernel = (kernel / normalized.shape[0]).to(torch.float32)
-
-                eigvals = torch.linalg.eigvalsh(kernel)
-                eigvals = eigvals.clamp_min(1.0e-8)
-                vendi_entropy = -(eigvals * eigvals.log()).sum()
-                grad = torch.autograd.grad(vendi_entropy, working_tokens, only_inputs=True)[0]
-
-        updated_tokens = (working_tokens + update_scale * grad).detach().to(original_tokens.dtype)
-        if bool_mask is not None:
-            updated_tokens = torch.where(bool_mask.unsqueeze(-1), updated_tokens, original_tokens)
-
-    return updated_tokens
-
-
 class TimestepEmbedder(nn.Module):
     def __init__(self, out_size, mid_size=None, frequency_embedding_size=FREQUENCY_EMBEDDING_SIZE):
         super().__init__()
@@ -451,10 +407,6 @@ class ZImageTransformerBlock(nn.Module):
         freqs_cis: torch.Tensor,
         adaln_input: Optional[torch.Tensor] = None,
         attn_params: Optional[AttentionParams] = None,
-        repulsion_config: Optional[ContextualRepulsionConfig] = None,
-        repulsion_step_idx: Optional[int] = None,
-        x_seq_len: Optional[int] = None,
-        cap_mask: Optional[torch.Tensor] = None,
     ):
         if self.modulation:
             assert adaln_input is not None
@@ -465,24 +417,12 @@ class ZImageTransformerBlock(nn.Module):
 
             attn_out = self.attention(self.attention_norm1(x) * scale_msa, freqs_cis=freqs_cis, attn_params=attn_params)
             del scale_msa
-            if x_seq_len is not None and x_seq_len < attn_out.shape[1]:
-                caption_tokens = attn_out[:, x_seq_len:, :]
-                caption_tokens = apply_contextual_vendi_repulsion(
-                    caption_tokens, cap_mask, repulsion_config, self.layer_id, repulsion_step_idx
-                )
-                attn_out = torch.cat([attn_out[:, :x_seq_len, :], caption_tokens], dim=1)
             x = x + gate_msa * self.attention_norm2(attn_out)
             del gate_msa
             x = x + gate_mlp * self.ffn_norm2(self.feed_forward(self.ffn_norm1(x) * scale_mlp))
             del scale_mlp, gate_mlp
         else:
             attn_out = self.attention(self.attention_norm1(x), freqs_cis=freqs_cis, attn_params=attn_params)
-            if x_seq_len is not None and x_seq_len < attn_out.shape[1]:
-                caption_tokens = attn_out[:, x_seq_len:, :]
-                caption_tokens = apply_contextual_vendi_repulsion(
-                    caption_tokens, cap_mask, repulsion_config, self.layer_id, repulsion_step_idx
-                )
-                attn_out = torch.cat([attn_out[:, :x_seq_len, :], caption_tokens], dim=1)
             x = x + self.attention_norm2(attn_out)
             x = x + self.ffn_norm2(self.feed_forward(self.ffn_norm1(x)))
 
@@ -494,29 +434,14 @@ class ZImageTransformerBlock(nn.Module):
         freqs_cis: torch.Tensor,
         adaln_input: Optional[torch.Tensor] = None,
         attn_params: Optional[AttentionParams] = None,
-        repulsion_config: Optional[ContextualRepulsionConfig] = None,
-        repulsion_step_idx: Optional[int] = None,
-        x_seq_len: Optional[int] = None,
-        cap_mask: Optional[torch.Tensor] = None,
     ):
         if self.training and self.gradient_checkpointing:
             forward_fn = self._forward
             if self.activation_cpu_offloading:
                 forward_fn = create_cpu_offloading_wrapper(forward_fn, self.feed_forward.w1.weight.device)
-            return checkpoint(
-                forward_fn,
-                x,
-                freqs_cis,
-                adaln_input,
-                attn_params,
-                repulsion_config,
-                repulsion_step_idx,
-                x_seq_len,
-                cap_mask,
-                use_reentrant=False,
-            )
+            return checkpoint(forward_fn, x, freqs_cis, adaln_input, attn_params, use_reentrant=False)
         else:
-            return self._forward(x, freqs_cis, adaln_input, attn_params, repulsion_config, repulsion_step_idx, x_seq_len, cap_mask)
+            return self._forward(x, freqs_cis, adaln_input, attn_params)
 
 
 class FinalLayer(nn.Module):
@@ -917,6 +842,50 @@ class ZImageTransformer2DModel(nn.Module):
         # Caption positions: (i + 1, 0, 0) for i in range(cap_seq_len). [cap_seq_len, 3]
         return self.create_coordinate_grid(size=(cap_seq_len, 1, 1), start=(1, 0, 0), device=device).flatten(0, 2)
 
+    def _apply_contextual_vendi_repulsion(
+        self,
+        caption_tokens: torch.Tensor,
+        cap_mask: Optional[torch.Tensor],
+        repulsion_config: Optional[ContextualRepulsionConfig],
+        layer_idx: int,
+        step_idx: Optional[int],
+    ) -> torch.Tensor:
+        if repulsion_config is None or not repulsion_config.active_for(layer_idx, step_idx):
+            return caption_tokens
+        if caption_tokens.shape[0] < 2:
+            return caption_tokens
+
+        original_tokens = caption_tokens
+        updated_tokens = caption_tokens
+        bool_mask = None if cap_mask is None else cap_mask.to(device=caption_tokens.device, dtype=torch.bool)
+        update_scale = repulsion_config.scale / repulsion_config.inner_steps
+
+        for _ in range(repulsion_config.inner_steps):
+            with torch.enable_grad():
+                autocast_device = caption_tokens.device.type
+                with torch.autocast(device_type=autocast_device, enabled=False):
+                    working_tokens = updated_tokens.detach().to(torch.float32).requires_grad_(True)
+                    masked_tokens = working_tokens
+                    if bool_mask is not None:
+                        masked_tokens = masked_tokens * bool_mask.unsqueeze(-1).to(masked_tokens.dtype)
+
+                    flattened = masked_tokens.reshape(masked_tokens.shape[0], -1)
+                    normalized = F.normalize(flattened, dim=-1, eps=1e-6)
+                    kernel = normalized @ normalized.transpose(0, 1)
+                    kernel = 0.5 * (kernel + kernel.transpose(0, 1))
+                    kernel = (kernel / normalized.shape[0]).to(torch.float32)
+
+                    eigvals = torch.linalg.eigvalsh(kernel)
+                    eigvals = eigvals.clamp_min(1.0e-8)
+                    vendi_entropy = -(eigvals * eigvals.log()).sum()
+                    grad = torch.autograd.grad(vendi_entropy, working_tokens, only_inputs=True)[0]
+
+            updated_tokens = (working_tokens + update_scale * grad).detach().to(original_tokens.dtype)
+            if bool_mask is not None:
+                updated_tokens = torch.where(bool_mask.unsqueeze(-1), updated_tokens, original_tokens)
+
+        return updated_tokens
+
     def forward(
         self,
         x: torch.Tensor,
@@ -1010,16 +979,17 @@ class ZImageTransformer2DModel(nn.Module):
             if self.blocks_to_swap:
                 self.offloader.wait_for_block(index)
 
-            unified = layer(
-                unified,
-                unified_freqs_cis,
-                adaln_input,
-                attn_params=attn_params,
-                repulsion_config=repulsion_config,
-                repulsion_step_idx=repulsion_step_idx,
-                x_seq_len=x_seq_len,
-                cap_mask=cap_mask,
-            )
+            unified = layer(unified, unified_freqs_cis, adaln_input, attn_params=attn_params)
+            if repulsion_config is not None and repulsion_config.active_for(index, repulsion_step_idx):
+                caption_tokens = unified[:, x_seq_len:, :]
+                caption_tokens = self._apply_contextual_vendi_repulsion(
+                    caption_tokens,
+                    cap_mask,
+                    repulsion_config,
+                    index,
+                    repulsion_step_idx,
+                )
+                unified = torch.cat([unified[:, :x_seq_len, :], caption_tokens], dim=1)
 
             if self.blocks_to_swap:
                 self.offloader.submit_move_blocks_forward(self.layers, index)
