@@ -6,6 +6,7 @@ import random
 import time
 
 import torch
+from PIL import Image
 
 from library import strategy_zimage, train_util, zimage_utils
 from library.device_utils import init_ipex, get_preferred_device
@@ -18,6 +19,44 @@ import logging
 logger = logging.getLogger(__name__)
 
 init_ipex()
+
+
+INFERENCE_BATCH_SIZE = 4
+
+
+def _decoded_batch_to_pils(decoded: torch.Tensor) -> list[Image.Image]:
+    image = (decoded / 2 + 0.5)
+    image = torch.nan_to_num(image.detach().to(torch.float32), nan=0.0, posinf=1.0, neginf=0.0).clamp(0, 1).cpu()
+
+    if image.ndim == 3:
+        image = image.unsqueeze(0)
+
+    pil_images: list[Image.Image] = []
+    for sample in image:
+        sample_np = sample.permute(1, 2, 0).numpy()
+        sample_np = (sample_np * 255).round().clip(0, 255).astype("uint8")
+        pil_images.append(Image.fromarray(sample_np))
+    return pil_images
+
+
+def _make_2x2_grid(images: list[Image.Image]) -> Image.Image:
+    if len(images) != INFERENCE_BATCH_SIZE:
+        raise ValueError(f"Expected {INFERENCE_BATCH_SIZE} images, got {len(images)}")
+
+    widths = [img.width for img in images]
+    heights = [img.height for img in images]
+    if len(set(widths)) != 1 or len(set(heights)) != 1:
+        raise ValueError("All images must have the same size to create a 2x2 grid")
+
+    cell_w = widths[0]
+    cell_h = heights[0]
+    grid = Image.new("RGB", (cell_w * 2, cell_h * 2))
+
+    positions = [(0, 0), (cell_w, 0), (0, cell_h), (cell_w, cell_h)]
+    for img, pos in zip(images, positions):
+        grid.paste(img, pos)
+
+    return grid
 
 
 def generate_image(
@@ -44,7 +83,8 @@ def generate_image(
 
     if seed is None:
         seed = random.randint(0, 2**32 - 1)
-    logger.info(f"seed: {seed}")
+    seeds = [seed + i for i in range(INFERENCE_BATCH_SIZE)]
+    logger.info(f"seeds: {seeds}")
 
     if negative_prompt is None:
         negative_prompt = ""
@@ -67,6 +107,8 @@ def generate_image(
         device,
         dtype,
     )
+    prompt_embeds = prompt_embeds.repeat(INFERENCE_BATCH_SIZE, 1, 1)
+    prompt_mask = prompt_mask.repeat(INFERENCE_BATCH_SIZE, 1)
 
     do_cfg = guidance_scale is not None and guidance_scale > 1.0
     if do_cfg:
@@ -79,16 +121,24 @@ def generate_image(
             device,
             dtype,
         )
+        negative_embeds = negative_embeds.repeat(INFERENCE_BATCH_SIZE, 1, 1)
+        negative_mask = negative_mask.repeat(INFERENCE_BATCH_SIZE, 1)
     else:
         negative_embeds = None
         negative_mask = None
 
     channels = getattr(transformer, "in_channels", 16)
-    latents = torch.randn(
-        (1, channels, height // 8, width // 8),
-        device=device,
-        dtype=torch.float32,
-        generator=torch.Generator(device=device).manual_seed(seed),
+    latents = torch.stack(
+        [
+            torch.randn(
+                (channels, height // 8, width // 8),
+                device=device,
+                dtype=torch.float32,
+                generator=torch.Generator(device=device).manual_seed(sample_seed),
+            )
+            for sample_seed in seeds
+        ],
+        dim=0,
     )
 
     timesteps, sigmas = zimage_train_utils._get_timesteps_sigmas(sample_steps, discrete_flow_shift)
@@ -115,12 +165,13 @@ def generate_image(
         latents = latents.to(vae.dtype)
         latents = zimage_train_utils._unscale_latents(latents, vae)
         decoded = zimage_train_utils._decode_latents(vae, latents)
-        image = zimage_train_utils._latents_to_pil(decoded)
+        images = _decoded_batch_to_pils(decoded)
+        image = _make_2x2_grid(images)
 
     os.makedirs(output_dir, exist_ok=True)
     ts_str = time.strftime("%Y%m%d%H%M%S", time.localtime())
     num_suffix = f"{sample_steps:06d}"
-    seed_suffix = f"_{seed}"
+    seed_suffix = f"_s{seeds[0]}-{seeds[-1]}"
     index = prompt_dict.get("enum", 0)
     filename = f"{'' if output_name is None else output_name + '_'}{num_suffix}_{index:02d}_{ts_str}{seed_suffix}.png"
     image.save(os.path.join(output_dir, filename))
