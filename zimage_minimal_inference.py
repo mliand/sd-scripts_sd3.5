@@ -12,6 +12,7 @@ from library import strategy_zimage, train_util, zimage_utils
 from library.device_utils import init_ipex, get_preferred_device
 from library.utils import setup_logging
 from library import zimage_train_utils
+from library.zimage_model import ContextualRepulsionConfig
 
 setup_logging()
 import logging
@@ -72,6 +73,7 @@ def generate_image(
     discrete_flow_shift,
     device,
     dtype,
+    repulsion_config: ContextualRepulsionConfig | None,
 ):
     prompt: str = prompt_dict.get("prompt", "")
     negative_prompt = prompt_dict.get("negative_prompt")
@@ -151,10 +153,24 @@ def generate_image(
             timestep = (1000 - timestep) / 1000
 
             latent_model_input = latents.to(dtype).unsqueeze(2)
-            model_out = transformer(x=latent_model_input, t=timestep, cap_feats=prompt_embeds, cap_mask=prompt_mask)
+            model_out = transformer(
+                x=latent_model_input,
+                t=timestep,
+                cap_feats=prompt_embeds,
+                cap_mask=prompt_mask,
+                repulsion_config=repulsion_config,
+                repulsion_step_idx=i,
+            )
 
             if do_cfg:
-                neg_out = transformer(x=latent_model_input, t=timestep, cap_feats=negative_embeds, cap_mask=negative_mask)
+                neg_out = transformer(
+                    x=latent_model_input,
+                    t=timestep,
+                    cap_feats=negative_embeds,
+                    cap_mask=negative_mask,
+                    repulsion_config=None,
+                    repulsion_step_idx=None,
+                )
                 noise_pred = model_out + guidance_scale * (model_out - neg_out)
             else:
                 noise_pred = model_out
@@ -173,7 +189,15 @@ def generate_image(
     num_suffix = f"{sample_steps:06d}"
     seed_suffix = f"_s{seeds[0]}-{seeds[-1]}"
     index = prompt_dict.get("enum", 0)
-    filename = f"{'' if output_name is None else output_name + '_'}{num_suffix}_{index:02d}_{ts_str}{seed_suffix}.png"
+    repulsion_suffix = ""
+    if repulsion_config is not None and repulsion_config.enabled:
+        repulsion_suffix = (
+            f"_vendi_rs{repulsion_config.scale:g}_ri{repulsion_config.inner_steps}"
+            f"_rt{repulsion_config.t_until}"
+        )
+    filename = (
+        f"{'' if output_name is None else output_name + '_'}{num_suffix}_{index:02d}_{ts_str}{seed_suffix}{repulsion_suffix}.png"
+    )
     image.save(os.path.join(output_dir, filename))
 
 
@@ -198,6 +222,10 @@ def main():
     parser.add_argument("--output_name", type=str, default=None)
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--bf16", action="store_true")
+    parser.add_argument("--contextual_repulsion", action="store_true", help="enable Vendi-entropy repulsion on caption tokens")
+    parser.add_argument("--repulsion_scale", type=float, default=1.0e4, help="gradient ascent scale for Vendi entropy repulsion")
+    parser.add_argument("--repulsion_inner_steps", type=int, default=1, help="number of inner Vendi updates per active layer")
+    parser.add_argument("--repulsion_t_until", type=int, default=4, help="apply repulsion only for denoising steps in [0, t_until)")
     parser.add_argument(
         "--gate_type",
         type=str,
@@ -310,6 +338,15 @@ def main():
     else:
         prompts = train_util.load_prompts(args.sample_prompts)
 
+    repulsion_config = None
+    if args.contextual_repulsion:
+        repulsion_config = ContextualRepulsionConfig(
+            enabled=True,
+            scale=args.repulsion_scale,
+            inner_steps=args.repulsion_inner_steps,
+            t_until=args.repulsion_t_until,
+        )
+
     save_dir = os.path.join(args.output_dir, "sample")
     for prompt_dict in prompts:
         generate_image(
@@ -325,6 +362,7 @@ def main():
             args.discrete_flow_shift,
             device,
             dtype,
+            repulsion_config,
         )
 
 

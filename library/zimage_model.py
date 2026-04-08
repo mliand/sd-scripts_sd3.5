@@ -19,6 +19,7 @@
 """Z-Image Transformer."""
 
 import math
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union
 import logging
 
@@ -56,6 +57,21 @@ class ModelOffloader:
 
     def set_forward_only(self, forward_only: bool):
         self.forward_only = forward_only
+
+
+@dataclass(frozen=True)
+class ContextualRepulsionConfig:
+    enabled: bool = False
+    scale: float = 0.0
+    inner_steps: int = 1
+    t_until: int = 0
+
+    def active_for(self, layer_idx: int, step_idx: Optional[int]) -> bool:
+        if not self.enabled or self.scale == 0.0 or self.inner_steps <= 0:
+            return False
+        if step_idx is None or step_idx >= self.t_until:
+            return False
+        return True
 
 
 class TimestepEmbedder(nn.Module):
@@ -826,6 +842,48 @@ class ZImageTransformer2DModel(nn.Module):
         # Caption positions: (i + 1, 0, 0) for i in range(cap_seq_len). [cap_seq_len, 3]
         return self.create_coordinate_grid(size=(cap_seq_len, 1, 1), start=(1, 0, 0), device=device).flatten(0, 2)
 
+    def _apply_contextual_vendi_repulsion(
+        self,
+        caption_tokens: torch.Tensor,
+        cap_mask: Optional[torch.Tensor],
+        repulsion_config: Optional[ContextualRepulsionConfig],
+        layer_idx: int,
+        step_idx: Optional[int],
+    ) -> torch.Tensor:
+        if repulsion_config is None or not repulsion_config.active_for(layer_idx, step_idx):
+            return caption_tokens
+        if caption_tokens.shape[0] < 2:
+            return caption_tokens
+
+        original_tokens = caption_tokens
+        updated_tokens = caption_tokens
+        bool_mask = None if cap_mask is None else cap_mask.to(device=caption_tokens.device, dtype=torch.bool)
+        update_scale = repulsion_config.scale / repulsion_config.inner_steps
+
+        for _ in range(repulsion_config.inner_steps):
+            with torch.enable_grad():
+                working_tokens = updated_tokens.detach().to(torch.float32).requires_grad_(True)
+                masked_tokens = working_tokens
+                if bool_mask is not None:
+                    masked_tokens = masked_tokens * bool_mask.unsqueeze(-1).to(masked_tokens.dtype)
+
+                flattened = masked_tokens.reshape(masked_tokens.shape[0], -1)
+                normalized = F.normalize(flattened, dim=-1, eps=1e-6)
+                kernel = normalized @ normalized.transpose(0, 1)
+                kernel = 0.5 * (kernel + kernel.transpose(0, 1))
+                kernel = kernel / normalized.shape[0]
+
+                eigvals = torch.linalg.eigvalsh(kernel)
+                eigvals = eigvals.clamp_min(1.0e-8)
+                vendi_entropy = -(eigvals * eigvals.log()).sum()
+                grad = torch.autograd.grad(vendi_entropy, working_tokens, only_inputs=True)[0]
+
+            updated_tokens = (working_tokens + update_scale * grad).detach().to(original_tokens.dtype)
+            if bool_mask is not None:
+                updated_tokens = torch.where(bool_mask.unsqueeze(-1), updated_tokens, original_tokens)
+
+        return updated_tokens
+
     def forward(
         self,
         x: torch.Tensor,
@@ -834,6 +892,8 @@ class ZImageTransformer2DModel(nn.Module):
         cap_mask: torch.Tensor,
         patch_size: int = 2,
         f_patch_size: int = 1,
+        repulsion_config: Optional[ContextualRepulsionConfig] = None,
+        repulsion_step_idx: Optional[int] = None,
     ) -> torch.Tensor:
         """
         Forward pass of the Z-Image Transformer.
@@ -918,6 +978,16 @@ class ZImageTransformer2DModel(nn.Module):
                 self.offloader.wait_for_block(index)
 
             unified = layer(unified, unified_freqs_cis, adaln_input, attn_params=attn_params)
+            if repulsion_config is not None and repulsion_config.active_for(index, repulsion_step_idx):
+                caption_tokens = unified[:, x_seq_len:, :]
+                caption_tokens = self._apply_contextual_vendi_repulsion(
+                    caption_tokens,
+                    cap_mask,
+                    repulsion_config,
+                    index,
+                    repulsion_step_idx,
+                )
+                unified = torch.cat([unified[:, :x_seq_len, :], caption_tokens], dim=1)
 
             if self.blocks_to_swap:
                 self.offloader.submit_move_blocks_forward(self.layers, index)

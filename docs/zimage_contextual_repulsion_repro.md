@@ -4,7 +4,7 @@
 `On-the-fly Repulsion in the Contextual Space for Rich Diversity in Diffusion Transformers`
 的开发路线。
 
-目标不是一次性完整照搬论文，而是先在 `zimage` 上做出一个可运行、可观察、可评估的最小复现版本，再逐步补齐批量评测、参数消融和交互界面。
+目标不是一次性完整照搬论文，而是先在 `zimage` 上做出一个可运行、可观察、可评估的最小复现版本，并且从第一版开始就直接使用论文主目标 `Vendi entropy`，而不是先用简化的替代 loss。
 
 ## 1. 重要架构差异
 
@@ -125,24 +125,24 @@
 - 在 `library/zimage_model.py` 增加可选的 contextual repulsion hook。
 - 先不做 Gradio，不做评测，不做额外配置文件。
 
-### Phase 2: 目标函数先从简单版开始
+### Phase 2: 直接实现论文版 Vendi entropy
 
-论文使用的是基于相似度矩阵特征值的 Vendi entropy。这个可以做，但不建议第一步就把复杂版本和所有数值稳定性问题一起引入。
+这一版不再经过“简单 loss 验证”的中间阶段，而是直接按论文目标实现 batch-level Vendi entropy。
 
-建议分两步：
+实现目标：
 
-1. 第一版先实现一个简单、稳定、便于看效果的 batch repulsion loss
-   - 例如对 flatten 后 contextual vectors 做 pairwise cosine similarity repulsion。
-   - 目标是先验证“干预位置”是对的。
-2. 第二版再切到论文更接近的 Vendi entropy
-   - 构造 `B x B` cosine kernel。
-   - 归一化后求特征值。
-   - 用 negative von Neumann entropy 作为优化目标。
+- 对 batch 内 contextual vectors 构造 `B x B` cosine kernel。
+- 对 kernel 做归一化。
+- 计算特征值。
+- 用 negative von Neumann entropy 作为 diversity objective。
+- 在每个启用的 layer / timestep 上，用该 objective 对 caption slice 做小步梯度上升。
 
-这样做的原因：
+实现注意点：
 
-- 如果第一版就没有任何 diversity 改善，问题更可能在干预位置或插入时机，不在 loss 形式。
-- 先把系统走通，再做 loss fidelity 对齐，排错成本更低。
+- 所有 Vendi 计算统一转到 `float32`。
+- 对 eigenvalues 做最小值裁剪，避免 `log(0)`。
+- padding token 不应参与有效语义相似度计算。
+- 每次 inner-step 都要局部 `detach + requires_grad`，避免采样图无限增长。
 
 ### Phase 3: 干预位置和时机一起做保守版本
 
@@ -184,10 +184,12 @@
 - `repulsion_scale`
 - `repulsion_inner_steps`
 - `repulsion_t_until`
-- `repulsion_layer_start`
-- `repulsion_layer_end`
-- `repulsion_loss_type`
-- `repulsion_batch_size`
+
+说明：
+
+- block 选择不作为第一版 CLI 参数暴露。
+- `zimage` 第一版默认对主干 `self.layers` 全部 block 应用 repulsion。
+- 负向 CFG 分支第一版默认不加 repulsion。
 
 ## 5. 建议的代码改造方式
 
@@ -230,7 +232,6 @@ unified = torch.cat([unified[:, :x_seq_len, :], caption_tokens], dim=1)
 - `repulsion_scale`
 - `repulsion_t_until`
 - `repulsion_inner_steps`
-- `loss_type`
 
 不建议第一版把所有实验参数都暴露到 UI。
 
@@ -339,21 +340,14 @@ for layer_idx, layer in enumerate(self.layers):
 - artifact 没有明显失控。
 - 与 `context_refiner` 输出做一次对照，确认“主干后的 caption slice”优于“纯文本 self-attention 输出”。
 
-### Milestone C: loss 升级到 Vendi
-
-交付标准：
-
-- 支持 cosine pairwise 与 Vendi 两种 loss。
-- 在相同 prompt 集上比较两者效果和稳定性。
-
-### Milestone D: 做层位和 timestep 消融
+### Milestone C: 做层位和 timestep 消融
 
 交付标准：
 
 - 比较前段层、中段层、后段层的差异。
 - 比较早期 timestep 和全程 repulsion 的差异。
 
-### Milestone E: 接入交互界面和实验参数
+### Milestone D: 接入交互界面和实验参数
 
 交付标准：
 
@@ -374,10 +368,10 @@ for layer_idx, layer in enumerate(self.layers):
 
 1. 先确认 `zimage` 中 `unified[:, x_seq_len:, :]` 的层间可见性。
 2. 在 `zimage_minimal_inference.py` 上实现 batch 推理。
-3. 实现最简单的 cosine repulsion hook。
+3. 直接实现 Vendi entropy repulsion hook。
 4. 用 `context_refiner` 输出和 `main layers` caption slice 做一次对照实验。
 5. 先做 10 到 20 个 prompt 的肉眼对比。
-6. 如果方向成立，再补 Vendi 和更多评测。
+6. 补层位、timestep 和 scale 消融。
 7. 最后再接 `zimage_gradio.py` 和训练脚本参数化。
 
 ## 11. 本文档对应的第一批实际改动目标
@@ -389,6 +383,6 @@ for layer_idx, layer in enumerate(self.layers):
 - 任务 2
   - 在 `zimage_minimal_inference.py` 里做 batch 采样和 hook 参数传递。
 - 任务 3
-  - 实现一个最小版 contextual repulsion loss，并跑出第一组对比图。
+  - 直接实现 Vendi entropy repulsion，并跑出第一组对比图。
 
-如果这三步跑通，再决定是否要把论文里的 Vendi objective、block 选择、timestep ablation 全量补齐。
+如果这三步跑通，再继续补 block 选择、timestep ablation 和更系统的评测。
