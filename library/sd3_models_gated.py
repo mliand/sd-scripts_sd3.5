@@ -48,6 +48,7 @@ class GatedAttentionLinears(nn.Module):
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.gate_type = gate_type
+        self.gate_enabled = True
 
         # Calculate additional dimensions for gate
         if gate_type == "headwise":
@@ -113,6 +114,9 @@ class GatedAttentionLinears(nn.Module):
 
         return q, k, v, gate_score
 
+    def set_gate_enabled(self, enabled: bool):
+        self.gate_enabled = enabled
+
     def apply_gate(self, attn_output: torch.Tensor, gate_score: Optional[torch.Tensor]) -> torch.Tensor:
         """
         Apply gating to attention output.
@@ -124,7 +128,7 @@ class GatedAttentionLinears(nn.Module):
         Returns:
             Gated attention output with same shape as input
         """
-        if gate_score is None or self.gate_type == "none":
+        if gate_score is None or self.gate_type == "none" or not self.gate_enabled:
             return attn_output
 
         B, L = attn_output.shape[:2]
@@ -318,6 +322,11 @@ class GatedSingleDiTBlock(nn.Module):
         x = x + mlp_
         return x
 
+    def set_gate_enabled(self, enabled: bool):
+        self.attn.set_gate_enabled(enabled)
+        if self.x_block_self_attn:
+            self.attn2.set_gate_enabled(enabled)
+
     def set_log_gate_stats(self, enabled: bool):
         """Enable or disable gate statistics logging."""
         self._log_gate_stats = enabled
@@ -354,6 +363,10 @@ class GatedMMDiTBlock(nn.Module):
 
     def enable_gradient_checkpointing(self):
         self.gradient_checkpointing = True
+
+    def set_gate_enabled(self, enabled: bool):
+        self.context_block.set_gate_enabled(enabled)
+        self.x_block.set_gate_enabled(enabled)
 
     def set_log_gate_stats(self, enabled: bool):
         """Enable or disable gate statistics logging."""
@@ -923,6 +936,20 @@ class GatedMMDiT(nn.Module):
 
         x = self.final_layer(x, c, H, W)
         return x[:, :, :H, :W]
+
+    def set_gate_layers(self, layer_ids: Optional[List[int]] = None):
+        """Enable gated attention only for specified layers. Other layers bypass gating.
+
+        Args:
+            layer_ids: List of 0-based layer indices to enable gating. None means keep all enabled.
+        """
+        if layer_ids is None:
+            return
+        enabled = set(layer_ids)
+        for idx, block in enumerate(self.joint_blocks):
+            if hasattr(block, "set_gate_enabled"):
+                block.set_gate_enabled(idx in enabled)
+        logger.info(f"Gate layers set: {sorted(enabled)} out of {len(self.joint_blocks)} blocks")
 
     def set_log_gate_stats(self, enabled: bool):
         """Enable or disable gate statistics logging for all blocks."""

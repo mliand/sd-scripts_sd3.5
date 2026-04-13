@@ -305,6 +305,12 @@ if __name__ == "__main__":
         "--use_original_model", action="store_true",
         help="Use original MMDiT instead of GatedMMDiT (for comparison)",
     )
+    parser.add_argument(
+        "--gate_layers", type=str, default=None,
+        help="Layer indices (0-based) to enable gated attention. "
+             "Accepts commas/spaces/ranges, e.g. '24-36'. "
+             "Use 'all' for all layers. Must match training config.",
+    )
 
     args = parser.parse_args()
 
@@ -337,6 +343,28 @@ if __name__ == "__main__":
             sd3_dtype,
             loading_device,
         )
+
+        # Apply per-layer gate mask
+        def _parse_layer_spec(text: str):
+            if text in ("", "all"):
+                return None
+            parts = [p for p in text.replace(",", " ").split() if p]
+            indices = []
+            for part in parts:
+                if "-" in part:
+                    start, end = part.split("-", 1)
+                    start, end = int(start), int(end)
+                    if end < start:
+                        start, end = end, start
+                    indices.extend(range(start, end + 1))
+                else:
+                    indices.append(int(part))
+            return sorted(set(indices))
+
+        if args.gate_layers is not None:
+            gate_layers = _parse_layer_spec(args.gate_layers)
+            if gate_layers is not None:
+                mmdit.set_gate_layers(layer_ids=gate_layers)
 
         # Load text encoders and VAE
         clip_l = sd3_utils.load_clip_l(args.clip_l, sd3_dtype, loading_device, state_dict=state_dict)

@@ -318,6 +318,36 @@ def train(args):
 
     logger.info(f"Loaded GatedMMDiT: gate_type={args.gate_type}, model_type={mmdit.model_type}")
 
+    # Apply per-layer gate mask
+    def _parse_layer_spec(text: str):
+        if text in ("", "all"):
+            return None
+        parts = [p for p in text.replace(",", " ").split() if p]
+        indices = []
+        for part in parts:
+            if "-" in part:
+                start, end = part.split("-", 1)
+                start, end = int(start), int(end)
+                if end < start:
+                    start, end = end, start
+                indices.extend(range(start, end + 1))
+            else:
+                indices.append(int(part))
+        return sorted(set(indices))
+
+    def _normalize_gate_layers(value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return _parse_layer_spec(value)
+        if isinstance(value, list):
+            return sorted(set(int(x) for x in value))
+        return value
+
+    gate_layers = _normalize_gate_layers(args.gate_layers)
+    if gate_layers is not None:
+        mmdit.set_gate_layers(layer_ids=gate_layers)
+
     mmdit.set_pos_emb_random_crop_rate(args.pos_emb_random_crop_rate)
 
     # set resolutions for positional embeddings
@@ -830,6 +860,12 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--log_gate_stats_detailed", action="store_true",
         help="Log detailed per-block gate statistics (more verbose)",
+    )
+    parser.add_argument(
+        "--gate_layers", type=str, default=None,
+        help="Layer indices (0-based) to enable gated attention. "
+             "Accepts commas/spaces/ranges, e.g. '24-36'. "
+             "Use 'all' for all layers. Default: all layers gated.",
     )
 
     return parser
