@@ -537,6 +537,10 @@ def collect_gate_statistics(mmdit, prefix: str = "") -> Dict[str, float]:
     gate_sparsities = []
 
     for block_idx, block in enumerate(mmdit.joint_blocks):
+        # Skip blocks with gating disabled (they have static gate scores)
+        if hasattr(block, 'context_block') and not getattr(block.context_block.attn, 'gate_enabled', True):
+            continue
+
         if hasattr(block, 'get_gate_statistics'):
             block_stats = block.get_gate_statistics()
 
