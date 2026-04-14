@@ -199,6 +199,7 @@ def load_gated_mmdit_for_inference(
     gate_type: str,
     dtype: torch.dtype,
     device: str,
+    gate_layers=None,
 ):
     """
     Load a trained Gated MMDiT model for inference.
@@ -208,11 +209,12 @@ def load_gated_mmdit_for_inference(
         gate_type: Type of gating used during training ("headwise" or "elementwise")
         dtype: Model dtype
         device: Device to load the model to
+        gate_layers: Layer indices with gating. None = all layers.
 
     Returns:
         GatedMMDiT model
     """
-    logger.info(f"Loading Gated MMDiT from {ckpt_path} with gate_type={gate_type}...")
+    logger.info(f"Loading Gated MMDiT from {ckpt_path} with gate_type={gate_type}, gate_layers={gate_layers}...")
 
     # Load state dict
     state_dict = load_safetensors(ckpt_path, device, disable_mmap=True, dtype=dtype)
@@ -224,19 +226,15 @@ def load_gated_mmdit_for_inference(
         if k.startswith(mmdit_prefix):
             mmdit_sd[k[len(mmdit_prefix):]] = state_dict.pop(k)
 
-    # Check if this is already a gated model (check for gate dimensions in qkv weights)
+    # Check if this is already a gated model (check for gate dimensions in attn2 qkv weights)
     is_gated_checkpoint = False
     for key in mmdit_sd.keys():
-        if "attn.qkv.weight" in key:
-            # Check if the weight has extra gate dimensions
+        if "attn2.qkv.weight" in key:
             weight_shape = mmdit_sd[key].shape
-            # For SD3.5 Medium: hidden_size=2432, qkv_out=7296
-            # Gated headwise: qkv_out=7296+38=7334
-            # Gated elementwise: qkv_out=7296+2432=9728
             expected_qkv = weight_shape[1] * 3  # dim * 3
             if weight_shape[0] != expected_qkv:
                 is_gated_checkpoint = True
-                logger.info("Detected gated checkpoint (already has gate dimensions)")
+                logger.info("Detected gated checkpoint (attn2 already has gate dimensions)")
             break
 
     # Detect model params
@@ -244,7 +242,9 @@ def load_gated_mmdit_for_inference(
     logger.info(f"Detected model type: {params.model_type}, depth: {params.depth}")
 
     # Create gated model
-    mmdit = sd3_models_gated.create_gated_sd3_mmdit(params, attn_mode="torch", gate_type=gate_type)
+    mmdit = sd3_models_gated.create_gated_sd3_mmdit(
+        params, attn_mode="torch", gate_type=gate_type, gate_layers=gate_layers,
+    )
 
     if is_gated_checkpoint:
         # Load directly if already a gated checkpoint
@@ -252,7 +252,9 @@ def load_gated_mmdit_for_inference(
     else:
         # Convert original weights to gated format
         logger.info("Converting original weights to gated format...")
-        gated_sd = sd3_models_gated.load_gated_mmdit_from_original(mmdit_sd, gate_type=gate_type, depth=params.depth)
+        gated_sd = sd3_models_gated.load_gated_mmdit_from_original(
+            mmdit_sd, gate_type=gate_type, depth=params.depth, gate_layers=gate_layers,
+        )
         info = mmdit.load_state_dict(gated_sd, strict=False)
 
     if info.missing_keys:
@@ -336,15 +338,7 @@ if __name__ == "__main__":
         vae = sd3_utils.load_vae(None, sd3_dtype, loading_device, state_dict=state_dict)
         mmdit = sd3_utils.load_mmdit(state_dict, sd3_dtype, loading_device)
     else:
-        # Load gated model
-        mmdit, state_dict = load_gated_mmdit_for_inference(
-            args.ckpt_path,
-            args.gate_type,
-            sd3_dtype,
-            loading_device,
-        )
-
-        # Apply per-layer gate mask
+        # Parse gate_layers
         def _parse_layer_spec(text: str):
             if text in ("", "all"):
                 return None
@@ -361,10 +355,16 @@ if __name__ == "__main__":
                     indices.append(int(part))
             return sorted(set(indices))
 
-        if args.gate_layers is not None:
-            gate_layers = _parse_layer_spec(args.gate_layers)
-            if gate_layers is not None:
-                mmdit.set_gate_layers(layer_ids=gate_layers)
+        gate_layers = _parse_layer_spec(args.gate_layers) if args.gate_layers is not None else None
+
+        # Load gated model
+        mmdit, state_dict = load_gated_mmdit_for_inference(
+            args.ckpt_path,
+            args.gate_type,
+            sd3_dtype,
+            loading_device,
+            gate_layers=gate_layers,
+        )
 
         # Load text encoders and VAE
         clip_l = sd3_utils.load_clip_l(args.clip_l, sd3_dtype, loading_device, state_dict=state_dict)

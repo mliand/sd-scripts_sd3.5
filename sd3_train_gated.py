@@ -308,17 +308,7 @@ def train(args):
         if key.startswith(mmdit_prefix):
             mmdit_state_dict[key[len(mmdit_prefix):]] = sd3_state_dict.pop(key)
 
-    # Load Gated MMDiT
-    mmdit = sd3_models_gated.load_gated_mmdit(
-        mmdit_state_dict,
-        dtype=model_dtype,
-        device="cpu",
-        gate_type=args.gate_type,
-    )
-
-    logger.info(f"Loaded GatedMMDiT: gate_type={args.gate_type}, model_type={mmdit.model_type}")
-
-    # Apply per-layer gate mask
+    # Parse gate_layers
     def _parse_layer_spec(text: str):
         if text in ("", "all"):
             return None
@@ -345,8 +335,17 @@ def train(args):
         return value
 
     gate_layers = _normalize_gate_layers(args.gate_layers)
-    if gate_layers is not None:
-        mmdit.set_gate_layers(layer_ids=gate_layers)
+
+    # Load Gated MMDiT
+    mmdit = sd3_models_gated.load_gated_mmdit(
+        mmdit_state_dict,
+        dtype=model_dtype,
+        device="cpu",
+        gate_type=args.gate_type,
+        gate_layers=gate_layers,
+    )
+
+    logger.info(f"Loaded GatedMMDiT: gate_type={args.gate_type}, gate_layers={gate_layers}, model_type={mmdit.model_type}")
 
     mmdit.set_pos_emb_random_crop_rate(args.pos_emb_random_crop_rate)
 
