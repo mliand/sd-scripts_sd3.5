@@ -323,7 +323,7 @@ class GatedSingleDiTBlock(nn.Module):
         return x
 
     def set_gate_enabled(self, enabled: bool):
-        self.attn.set_gate_enabled(enabled)
+        # Only gate attn2 (self-attention), leave attn (joint attention) unchanged
         if self.x_block_self_attn:
             self.attn2.set_gate_enabled(enabled)
 
@@ -365,7 +365,7 @@ class GatedMMDiTBlock(nn.Module):
         self.gradient_checkpointing = True
 
     def set_gate_enabled(self, enabled: bool):
-        self.context_block.set_gate_enabled(enabled)
+        # Only gate attn2 (x_block self-attention), leave joint attention unchanged
         self.x_block.set_gate_enabled(enabled)
 
     def set_log_gate_stats(self, enabled: bool):
@@ -537,8 +537,11 @@ def collect_gate_statistics(mmdit, prefix: str = "") -> Dict[str, float]:
     gate_sparsities = []
 
     for block_idx, block in enumerate(mmdit.joint_blocks):
-        # Skip blocks with gating disabled (they have static gate scores)
-        if hasattr(block, 'context_block') and not getattr(block.context_block.attn, 'gate_enabled', True):
+        # Skip blocks without active gating (attn2 is the only gated attention)
+        x_block = getattr(block, 'x_block', None)
+        if x_block is not None and not getattr(x_block, 'x_block_self_attn', False):
+            continue
+        if x_block is not None and hasattr(x_block, 'attn2') and not getattr(x_block.attn2, 'gate_enabled', True):
             continue
 
         if hasattr(block, 'get_gate_statistics'):
