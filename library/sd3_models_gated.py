@@ -191,6 +191,7 @@ class GatedSingleDiTBlock(nn.Module):
         qk_norm: Optional[str] = None,
         x_block_self_attn: bool = False,
         gate_type: str = "headwise",  # "headwise" or "elementwise" or "none"
+        attn2_gate_type: Optional[str] = None,  # gate type for attn2; defaults to gate_type
         **block_kwargs,
     ):
         super().__init__()
@@ -212,9 +213,10 @@ class GatedSingleDiTBlock(nn.Module):
         if self.x_block_self_attn:
             assert not pre_only
             assert not scale_mod_only
+            actual_attn2_gate_type = attn2_gate_type if attn2_gate_type is not None else gate_type
             self.attn2 = GatedAttentionLinears(
                 dim=hidden_size, num_heads=num_heads, qkv_bias=qkv_bias,
-                pre_only=False, qk_norm=qk_norm, gate_type=gate_type
+                pre_only=False, qk_norm=qk_norm, gate_type=actual_attn2_gate_type
             )
 
         if not pre_only:
@@ -349,11 +351,13 @@ class GatedMMDiTBlock(nn.Module):
         pre_only = kwargs.pop("pre_only")
         x_block_self_attn = kwargs.pop("x_block_self_attn")
 
+        # Joint attention (attn) uses no gating; only attn2 (self-attention) gets gated
         self.context_block = GatedSingleDiTBlock(
-            *args, pre_only=pre_only, gate_type=gate_type, **kwargs
+            *args, pre_only=pre_only, gate_type="none", **kwargs
         )
         self.x_block = GatedSingleDiTBlock(
-            *args, pre_only=False, x_block_self_attn=x_block_self_attn, gate_type=gate_type, **kwargs
+            *args, pre_only=False, x_block_self_attn=x_block_self_attn,
+            gate_type="none", attn2_gate_type=gate_type if x_block_self_attn else "none", **kwargs
         )
 
         self.head_dim = self.x_block.attn.head_dim
@@ -442,40 +446,35 @@ def convert_attention_linears_to_gated(
     head_dim = None
 
     for key, value in state_dict.items():
-        if "attn.qkv.weight" in key or "attn2.qkv.weight" in key:
-            # This is the qkv weight, need to expand it
-            dim = value.shape[1]  # input dimension
-            out_dim = value.shape[0]  # should be dim * 3
+        # Only expand attn2 (self-attention) weights; attn (joint attention) stays unchanged
+        is_attn2 = "attn2.qkv.weight" in key or "attn2.qkv.bias" in key
+
+        if "attn2.qkv.weight" in key:
+            dim = value.shape[1]
+            out_dim = value.shape[0]
 
             if head_dim is None:
-                # Calculate head_dim from the dimensions
-                # dim * 3 = out_dim, so dim = out_dim / 3
                 hidden_dim = out_dim // 3
                 head_dim = hidden_dim // num_heads
 
-            # Calculate gate dimension
             if gate_type == "headwise":
                 gate_dim = num_heads
             elif gate_type == "elementwise":
-                gate_dim = out_dim // 3  # same as hidden_dim
+                gate_dim = out_dim // 3
             else:
                 gate_dim = 0
 
             if gate_dim > 0:
-                # Create new weight with additional gate dimensions
                 new_weight = torch.zeros(out_dim + gate_dim, dim, dtype=value.dtype, device=value.device)
                 new_weight[:out_dim] = value
-                # Gate weights are initialized to 0, so sigmoid(0) = 0.5
                 new_state_dict[key] = new_weight
             else:
                 new_state_dict[key] = value
 
-        elif "attn.qkv.bias" in key or "attn2.qkv.bias" in key:
-            # This is the qkv bias, need to expand it too
-            out_dim = value.shape[0]  # should be dim * 3
+        elif "attn2.qkv.bias" in key:
+            out_dim = value.shape[0]
             hidden_dim = out_dim // 3
 
-            # Calculate gate dimension
             if gate_type == "headwise":
                 gate_dim = num_heads
             elif gate_type == "elementwise":
@@ -484,14 +483,12 @@ def convert_attention_linears_to_gated(
                 gate_dim = 0
 
             if gate_dim > 0:
-                # Create new bias with additional gate dimensions
                 new_bias = torch.zeros(out_dim + gate_dim, dtype=value.dtype, device=value.device)
                 new_bias[:out_dim] = value
                 new_state_dict[key] = new_bias
             else:
                 new_state_dict[key] = value
         else:
-            # Other weights don't need modification
             new_state_dict[key] = value
 
     return new_state_dict
