@@ -34,6 +34,7 @@ text_encoder_batch_size = 1
 skip_cache_check = false
 
 gate_type = "elementwise"
+gate_target = "attn2"
 gate_layers = "24-36"
 log_gate_stats = true
 log_gate_stats_interval = 100

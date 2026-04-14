@@ -200,6 +200,7 @@ def load_gated_mmdit_for_inference(
     dtype: torch.dtype,
     device: str,
     gate_layers=None,
+    gate_target: str = "attn2",
 ):
     """
     Load a trained Gated MMDiT model for inference.
@@ -243,7 +244,8 @@ def load_gated_mmdit_for_inference(
 
     # Create gated model
     mmdit = sd3_models_gated.create_gated_sd3_mmdit(
-        params, attn_mode="torch", gate_type=gate_type, gate_layers=gate_layers,
+        params, attn_mode="torch", gate_type=gate_type,
+        gate_layers=gate_layers, gate_target=gate_target,
     )
 
     if is_gated_checkpoint:
@@ -253,7 +255,8 @@ def load_gated_mmdit_for_inference(
         # Convert original weights to gated format
         logger.info("Converting original weights to gated format...")
         gated_sd = sd3_models_gated.load_gated_mmdit_from_original(
-            mmdit_sd, gate_type=gate_type, depth=params.depth, gate_layers=gate_layers,
+            mmdit_sd, gate_type=gate_type, depth=params.depth,
+            gate_layers=gate_layers, gate_target=gate_target,
         )
         info = mmdit.load_state_dict(gated_sd, strict=False)
 
@@ -313,6 +316,11 @@ if __name__ == "__main__":
              "Accepts commas/spaces/ranges, e.g. '24-36'. "
              "Use 'all' for all layers. Must match training config.",
     )
+    parser.add_argument(
+        "--gate_target", type=str, default="attn2",
+        choices=["attn2", "joint", "all"],
+        help="Which attention to gate. Must match training config. Default: attn2",
+    )
 
     args = parser.parse_args()
 
@@ -364,6 +372,7 @@ if __name__ == "__main__":
             sd3_dtype,
             loading_device,
             gate_layers=gate_layers,
+            gate_target=args.gate_target,
         )
 
         # Load text encoders and VAE

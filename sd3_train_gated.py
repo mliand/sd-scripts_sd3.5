@@ -343,9 +343,10 @@ def train(args):
         device="cpu",
         gate_type=args.gate_type,
         gate_layers=gate_layers,
+        gate_target=args.gate_target,
     )
 
-    logger.info(f"Loaded GatedMMDiT: gate_type={args.gate_type}, gate_layers={gate_layers}, model_type={mmdit.model_type}")
+    logger.info(f"Loaded GatedMMDiT: gate_type={args.gate_type}, gate_target={args.gate_target}, gate_layers={gate_layers}, model_type={mmdit.model_type}")
 
     mmdit.set_pos_emb_random_crop_rate(args.pos_emb_random_crop_rate)
 
@@ -865,6 +866,12 @@ def setup_parser() -> argparse.ArgumentParser:
         help="Layer indices (0-based) to enable gated attention. "
              "Accepts commas/spaces/ranges, e.g. '24-36'. "
              "Use 'all' for all layers. Default: all layers gated.",
+    )
+    parser.add_argument(
+        "--gate_target", type=str, default="attn2",
+        choices=["attn2", "joint", "all"],
+        help="Which attention to gate: 'attn2' (self-attention only), "
+             "'joint' (joint attention only), 'all' (both). Default: attn2",
     )
 
     return parser

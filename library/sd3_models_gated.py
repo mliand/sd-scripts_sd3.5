@@ -346,24 +346,34 @@ class GatedSingleDiTBlock(nn.Module):
 class GatedMMDiTBlock(nn.Module):
     """MMDiT Block with Gated Attention."""
 
-    def __init__(self, *args, gate_type: str = "headwise", **kwargs):
+    def __init__(self, *args, gate_type: str = "headwise", gate_target: str = "attn2", **kwargs):
         super().__init__()
         pre_only = kwargs.pop("pre_only")
         x_block_self_attn = kwargs.pop("x_block_self_attn")
 
-        # Joint attention (attn) uses no gating; only attn2 (self-attention) gets gated
+        # gate_target controls which attentions get gated:
+        #   "attn2" - only self-attention (x_block.attn2)
+        #   "joint" - only joint attention (context_block.attn + x_block.attn)
+        #   "all"   - everything
+        gate_joint = gate_target in ("joint", "all")
+        gate_attn2 = gate_target in ("attn2", "all")
+
+        joint_gate = gate_type if gate_joint else "none"
+        attn2_gate = gate_type if (gate_attn2 and x_block_self_attn) else "none"
+
         self.context_block = GatedSingleDiTBlock(
-            *args, pre_only=pre_only, gate_type="none", **kwargs
+            *args, pre_only=pre_only, gate_type=joint_gate, **kwargs
         )
         self.x_block = GatedSingleDiTBlock(
             *args, pre_only=False, x_block_self_attn=x_block_self_attn,
-            gate_type="none", attn2_gate_type=gate_type if x_block_self_attn else "none", **kwargs
+            gate_type=joint_gate, attn2_gate_type=attn2_gate, **kwargs
         )
 
         self.head_dim = self.x_block.attn.head_dim
         self.mode = self.x_block.attn_mode
         self.gradient_checkpointing = False
         self.gate_type = gate_type
+        self.gate_target = gate_target
 
     def enable_gradient_checkpointing(self):
         self.gradient_checkpointing = True
@@ -431,28 +441,41 @@ class GatedMMDiTBlock(nn.Module):
 def convert_attention_linears_to_gated(
     state_dict: Dict[str, torch.Tensor],
     gate_type: str = "headwise",
-    num_heads: int = 38,  # SD3.5 Medium has 38 heads (depth=38)
-    gate_layers: Optional[List[int]] = None,  # layer indices to expand; None = all
+    num_heads: int = 38,
+    gate_layers: Optional[List[int]] = None,
+    gate_target: str = "attn2",  # "attn2", "joint", or "all"
 ) -> Dict[str, torch.Tensor]:
     """
     Convert original AttentionLinears weights to GatedAttentionLinears format.
-    Only expands attn2 (self-attention) qkv weights for layers in gate_layers.
+    Only expands qkv weights matching gate_target for layers in gate_layers.
     """
     import re
     gate_layers_set = set(gate_layers) if gate_layers is not None else None
     re_block_idx = re.compile(r"joint_blocks\.(\d+)\.")
 
+    # Determine which attention keys to expand
+    expand_joint = gate_target in ("joint", "all")
+    expand_attn2 = gate_target in ("attn2", "all")
+
+    def _should_expand(key: str) -> bool:
+        is_attn2 = "attn2.qkv." in key
+        is_joint = "attn.qkv." in key and "attn2." not in key
+        if is_attn2 and not expand_attn2:
+            return False
+        if is_joint and not expand_joint:
+            return False
+        if not is_attn2 and not is_joint:
+            return False
+        # Check layer index
+        m = re_block_idx.search(key)
+        if m and gate_layers_set is not None and int(m.group(1)) not in gate_layers_set:
+            return False
+        return True
+
     new_state_dict = {}
 
     for key, value in state_dict.items():
-        # Only expand attn2.qkv for gated layers
-        if "attn2.qkv." not in key:
-            new_state_dict[key] = value
-            continue
-
-        # Check if this layer should be gated
-        m = re_block_idx.search(key)
-        if m and gate_layers_set is not None and int(m.group(1)) not in gate_layers_set:
+        if not _should_expand(key):
             new_state_dict[key] = value
             continue
 
@@ -502,6 +525,7 @@ def load_gated_mmdit_from_original(
     gate_type: str = "headwise",
     depth: int = 38,
     gate_layers: Optional[List[int]] = None,
+    gate_target: str = "attn2",
 ) -> Dict[str, torch.Tensor]:
     """
     Load original MMDiT weights into a GatedMMDiT model.
@@ -511,12 +535,15 @@ def load_gated_mmdit_from_original(
         gate_type: "headwise" or "elementwise"
         depth: Number of layers (used to calculate num_heads)
         gate_layers: Layer indices to expand gate dims. None = all layers.
+        gate_target: "attn2", "joint", or "all"
 
     Returns:
         State dict compatible with GatedMMDiT
     """
     num_heads = depth  # In SD3, num_heads == depth
-    return convert_attention_linears_to_gated(original_state_dict, gate_type, num_heads, gate_layers)
+    return convert_attention_linears_to_gated(
+        original_state_dict, gate_type, num_heads, gate_layers, gate_target,
+    )
 
 
 def collect_gate_statistics(mmdit, prefix: str = "") -> Dict[str, float]:
@@ -539,11 +566,8 @@ def collect_gate_statistics(mmdit, prefix: str = "") -> Dict[str, float]:
     gate_sparsities = []
 
     for block_idx, block in enumerate(mmdit.joint_blocks):
-        # Skip blocks without active gating (attn2 is the only gated attention)
-        x_block = getattr(block, 'x_block', None)
-        if x_block is not None and not getattr(x_block, 'x_block_self_attn', False):
-            continue
-        if x_block is not None and hasattr(x_block, 'attn2') and not getattr(x_block.attn2, 'gate_enabled', True):
+        # Skip blocks with no active gating
+        if getattr(block, 'gate_type', 'none') == 'none':
             continue
 
         if hasattr(block, 'get_gate_statistics'):
@@ -627,6 +651,7 @@ class GatedMMDiT(nn.Module):
         model_type: str = "sd3m",
         gate_type: str = "headwise",  # "headwise" or "elementwise" or "none"
         gate_layers: Optional[List[int]] = None,  # layer indices to enable gating; None = all layers
+        gate_target: str = "attn2",  # "attn2", "joint", or "all"
     ):
         super().__init__()
         self._model_type = model_type
@@ -644,6 +669,7 @@ class GatedMMDiT(nn.Module):
         self.gradient_checkpointing = use_checkpoint
         self.gate_type = gate_type
         self.gate_layers = set(gate_layers) if gate_layers is not None else None
+        self.gate_target = gate_target
 
         # apply magic --> this defines a head_size of 64
         self.hidden_size = 64 * depth
@@ -702,6 +728,7 @@ class GatedMMDiT(nn.Module):
                     qk_norm=qk_norm,
                     x_block_self_attn=(i in self.x_block_self_attn_layers),
                     gate_type=gate_type if (self.gate_layers is None or i in self.gate_layers) else "none",
+                    gate_target=gate_target,
                 )
                 for i in range(depth)
             ]
@@ -970,7 +997,7 @@ class GatedMMDiT(nn.Module):
 
 def create_gated_sd3_mmdit(
     params: SD3Params, attn_mode: str = "torch", gate_type: str = "headwise",
-    gate_layers: Optional[List[int]] = None,
+    gate_layers: Optional[List[int]] = None, gate_target: str = "attn2",
 ) -> GatedMMDiT:
     """Create a GatedMMDiT model from SD3Params."""
     mmdit = GatedMMDiT(
@@ -991,6 +1018,7 @@ def create_gated_sd3_mmdit(
         use_bucketed_pos_embed=params.use_bucketed_pos_embed,
         gate_type=gate_type,
         gate_layers=gate_layers,
+        gate_target=gate_target,
     )
     return mmdit
 
@@ -1001,15 +1029,10 @@ def load_gated_mmdit(
     device: str = "cpu",
     gate_type: str = "headwise",
     gate_layers: Optional[List[int]] = None,
+    gate_target: str = "attn2",
 ) -> GatedMMDiT:
     """
     Load a GatedMMDiT model from an original MMDiT state dict.
-
-    This function:
-    1. Detects the model type from state dict
-    2. Creates a GatedMMDiT model
-    3. Converts the original weights to gated format
-    4. Loads the converted weights
 
     Args:
         state_dict: Original MMDiT state dict (with model.diffusion_model. prefix removed)
@@ -1017,6 +1040,7 @@ def load_gated_mmdit(
         device: Target device
         gate_type: "headwise" or "elementwise"
         gate_layers: Layer indices to enable gating. None = all layers.
+        gate_target: "attn2", "joint", or "all"
 
     Returns:
         GatedMMDiT model with loaded weights
@@ -1027,11 +1051,15 @@ def load_gated_mmdit(
     params = detect_sd3_model_type(state_dict)
 
     # Create gated model
-    mmdit = create_gated_sd3_mmdit(params, attn_mode="torch", gate_type=gate_type, gate_layers=gate_layers)
+    mmdit = create_gated_sd3_mmdit(
+        params, attn_mode="torch", gate_type=gate_type,
+        gate_layers=gate_layers, gate_target=gate_target,
+    )
 
-    # Convert original weights to gated format (only expands attn2 for gated layers)
+    # Convert original weights to gated format
     gated_state_dict = load_gated_mmdit_from_original(
-        state_dict, gate_type=gate_type, depth=params.depth, gate_layers=gate_layers,
+        state_dict, gate_type=gate_type, depth=params.depth,
+        gate_layers=gate_layers, gate_target=gate_target,
     )
 
     # Load weights
