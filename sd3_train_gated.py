@@ -722,6 +722,7 @@ def train(args):
                     unwrapped_mmdit = accelerator.unwrap_model(mmdit)
                     if hasattr(unwrapped_mmdit, 'get_gate_statistics'):
                         gate_stats = unwrapped_mmdit.get_gate_statistics()
+                        logger.info(f"[gate_stats debug] keys={list(gate_stats.keys())[:5]}, overall_mean={'gate_mean_overall' in gate_stats}")
                         # Only log overall statistics to reduce log size
                         if "gate_mean_overall" in gate_stats:
                             logs["gate/mean_overall"] = gate_stats["gate_mean_overall"]
