@@ -227,15 +227,21 @@ def load_gated_mmdit_for_inference(
         if k.startswith(mmdit_prefix):
             mmdit_sd[k[len(mmdit_prefix):]] = state_dict.pop(k)
 
-    # Check if this is already a gated model (check for gate dimensions in attn2 qkv weights)
+    # Check if this is already a gated model.
+    # This must work for gate_target in {"attn2", "joint", "all"} and for
+    # partial layer gating, so inspect any qkv projection for extra gate dims
+    # instead of only checking the first attn2 layer.
     is_gated_checkpoint = False
-    for key in mmdit_sd.keys():
-        if "attn2.qkv.weight" in key:
-            weight_shape = mmdit_sd[key].shape
-            expected_qkv = weight_shape[1] * 3  # dim * 3
-            if weight_shape[0] != expected_qkv:
-                is_gated_checkpoint = True
-                logger.info("Detected gated checkpoint (attn2 already has gate dimensions)")
+    hidden_size = mmdit_sd["x_embedder.proj.weight"].shape[0]
+    expected_qkv = hidden_size * 3
+    for key, value in mmdit_sd.items():
+        if not (key.endswith(".qkv.weight") or key.endswith(".qkv.bias")):
+            continue
+        if value.shape[0] != expected_qkv:
+            is_gated_checkpoint = True
+            logger.info(
+                f"Detected gated checkpoint from {key}: out_dim={value.shape[0]}, expected={expected_qkv}"
+            )
             break
 
     # Detect model params
